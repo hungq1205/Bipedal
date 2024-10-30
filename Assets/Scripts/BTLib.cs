@@ -1,11 +1,11 @@
-﻿using BFLib.AI.RL;
-using BFLib.Utility;
+﻿using BTLib.AI.RL;
+using BTLib.Utility;
 using System.Collections.Generic;
 using System.IO;
 using System;
 using System.Linq;
 
-namespace BFLib
+namespace BTLib
 {
     namespace AI
     {
@@ -61,12 +61,12 @@ namespace BFLib
             /// <summary>
             /// </summary>
             /// <param name="func">Takes current weight as parameter and returns a new weight</param>
-            void WeightAssignForEach(Func<float, float> func);
+            void WeightAssignForEach(Func<float, int, int, float> func);
 
             /// <summary>
             /// </summary>
             /// <param name="func">Takes current bias as parameter and returns a new bias</param>
-            void BiasAssignForEach(Func<float, float> func);
+            void BiasAssignForEach(Func<float, int, float> func);
         }
 
         public class DenseNeuralNetwork : INeuralNetwork
@@ -123,17 +123,17 @@ namespace BFLib
                     builder.Dispose();
             }
 
-            public void WeightAssignForEach(Func<float, float> func)
+            public void WeightAssignForEach(Func<float, int, int, float> func)
             {
                 for (int i = 0; i < Weights.LongLength; i++)
-                    Weights[i].AssignForEach((inIndex, outIndex, weight) => func(weight));
+                    Weights[i].AssignForEach((inIndex, outIndex, weight) => func(weight, Weights[i].inDim, Weights[i].outDim));
             }
 
-            public void BiasAssignForEach(Func<float, float> func)
+            public void BiasAssignForEach(Func<float, int, float> func)
             {
                 for (int i = 0; i < Layers.LongLength; i++)
                     for (int j = 0; j < Layers[i].dim; j++)
-                        Layers[i].SetBias(j, func(Layers[i].GetBias(j)));
+                        Layers[i].SetBias(j, func(Layers[i].GetBias(j), Layers[i].dim));
             }
 
             public void Backward(float[] loss, ForwardResult forwardLog)
@@ -1576,7 +1576,7 @@ namespace BFLib
 
             public interface IPolicyOptimization
             {
-                IPolicy Param { get; }
+                IPolicy Policy { get; }
 
                 int GetAction(float[] actProbs);
 
@@ -1594,11 +1594,11 @@ namespace BFLib
 
             public class PolicyGradient : IPolicyOptimization
             {
-                public IPolicy Param { get; private set; }
+                public IPolicy Policy { get; private set; }
 
-                public PolicyGradient(INeuralNetwork param)
+                public PolicyGradient(IPolicy policy)
                 {
-                    this.Param = param;
+                    Policy = policy;
                 }
 
                 public virtual int GetAction(float[] actProbs) => MathBT.DrawProbs(actProbs);
@@ -1607,9 +1607,9 @@ namespace BFLib
                 {
                     float[] outputs;
                     if (logits)
-                        outputs = Param.Forward(obs);
+                        outputs = Policy.Forward(obs);
                     else
-                        outputs = ActivationLayer.ForwardActivation(ActivationFunc.Softmax, Param.Forward(obs));
+                        outputs = ActivationLayer.ForwardActivation(ActivationFunc.Softmax, Policy.Forward(obs));
 
                     for (int i = 0; i < outputs.Length; i++)
                         outputs[i] = MathF.Log(outputs[action]) * mass;

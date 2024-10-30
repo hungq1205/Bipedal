@@ -694,7 +694,10 @@ MonoBehaviour:
   l_UpperLeg: {fileID: 485771131706500808}
   r_UpperLeg: {fileID: 8859175142351151630}
   scoreUI: {fileID: 5745369157539801712}
-  legSpeed: 70
+  learningRate: 0.01
+  actionFreq: 2
+  legSpeed: 150
+  deterministic: 0
 --- !u!1 &8021568582236070413
 GameObject:
   m_ObjectHideFlags: 0

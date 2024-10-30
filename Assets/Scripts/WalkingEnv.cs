@@ -1,6 +1,5 @@
-using System.Collections.Generic;
 using TMPro;
-using BFLib.AI.RL;
+using BTLib.AI.RL;
 using UnityEngine;
 using System;
 
@@ -20,6 +19,7 @@ public class WalkingEnv : UnityEnvironment
     {
         cam = FindObjectOfType<CameraFollow>();
         timer = timeoutSec;
+        uAgents.Add(SpawnAgent());
     }
 
     public override float Evaluate(IAgent agent)
@@ -37,18 +37,22 @@ public class WalkingEnv : UnityEnvironment
         if (agent is UnityAgent)
         {
             unboxedAgent = (UnityAgent)agent;
-
             unboxedAgent.SetPos(new Vector2(startingX, 0.1f));
             unboxedAgent.ResetStates();
             unboxedAgent.gameObject.SetActive(true);
         }
     }
 
+    public override void ResetStates()
+    {
+
+    }
+
     public UnityAgent SpawnAgent()
     {
         UnityAgent agent = GameObject.Instantiate(agentPrefab, spawner).GetComponent<UnityAgent>();
+        agent.Env = this;
         ResetAgent(agent);
-        agent.Policy = agent.GetDefaultPolicy();
 
         return agent;
     }

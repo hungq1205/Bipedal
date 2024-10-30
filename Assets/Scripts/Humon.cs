@@ -2,8 +2,8 @@ using System;
 using System.Collections;
 using UnityEngine;
 using TMPro;
-using BFLib.AI;
-using BFLib.AI.RL;
+using BTLib.AI;
+using BTLib.AI.RL;
 
 public class Humon : UnityAgent
 {
@@ -17,6 +17,8 @@ public class Humon : UnityAgent
 
     bool active;
     float elapsed = 0;
+    float[] prevObs;
+    int prevAction = -1;
 
     float _score;
     public float Score
@@ -37,9 +39,9 @@ public class Humon : UnityAgent
         };
 
         active = false;
-        StartCoroutine(WaitActive());
         Policy = GetDefaultPolicy();
-        PolicyOpt = new PolicyGradient(policy);
+        PolicyOpt = new PolicyGradient(Policy);
+        StartCoroutine(WaitActive());
     }
 
     void FixedUpdate()
@@ -57,21 +59,25 @@ public class Humon : UnityAgent
 
     public override IPolicy GetDefaultPolicy()
     {
-        if(defaultPolicy == null)
+        Optimizer opt = new Adam(learningRate: learningRate);
+
+        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(5);
+        builder.NewLayers(
+            new ActivationLayer(32, ActivationFunc.ReLU),
+            new ActivationLayer(32, ActivationFunc.ReLU),
+            new ActivationLayer(32, ActivationFunc.ReLU),
+            new ActivationLayer(4, ActivationFunc.ReLU)
+        );
+
+        var policy = new DenseNeuralNetwork(builder, opt);
+        policy.BiasAssignForEach((b, dim) => 0f);
+        policy.WeightAssignForEach((w, inDim, outDim) =>
         {
-            Optimizer opt = new Adam(learningRate: learningRate);
+            float stddev = Mathf.Sqrt(2f / (inDim + outDim));
+            return UnityEngine.Random.Range(-stddev, stddev);
+        });
 
-            DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(5);
-            builder.NewLayers(
-                new ActivationLayer(32, ActivationFunc.ReLU),
-                new ActivationLayer(32, ActivationFunc.ReLU),
-                new ActivationLayer(32, ActivationFunc.ReLU),
-                new ActivationLayer(4, ActivationFunc.Softmax)
-            );
-            defaultPolicy = new DenseNeuralNetwork(builder, opt);
-        }
-
-        return defaultPolicy;
+        return policy;
     }
 
     public override void ResetStates()
@@ -160,16 +166,25 @@ public class Humon : UnityAgent
 
     public override void TakeAction()
     {
-        var outputs = Policy.Forward(new float[] {
-                GetPartSignedAngle(l_LowerLeg),
-                GetPartSignedAngle(l_UpperLeg),
-                GetPartSignedAngle(r_LowerLeg),
-                GetPartSignedAngle(r_UpperLeg),
-                GetPos().y
-            });
+        if (prevAction != -1)
+            Policy.Update(PolicyOpt.ComputeLoss(prevObs, prevAction, 1f));
+
+        float[] obs = new[] {
+            GetPartSignedAngle(l_LowerLeg),
+            GetPartSignedAngle(l_UpperLeg),
+            GetPartSignedAngle(r_LowerLeg),
+            GetPartSignedAngle(r_UpperLeg),
+            GetPos().y
+        };
+        prevObs ??= new float[obs.Length];
+        for (int i = 0; i < obs.Length; i++)
+            prevObs[i] = obs[i];
+
+        var outputs = Policy.Forward(obs);
+        string s = string.Join(", ", obs);
+        Debug.Log(s);
 
         int action = -1;
-
         if (deterministic)
         {
             float max = -1;
@@ -191,7 +206,7 @@ public class Humon : UnityAgent
                 if (rand <= 0)
                 {
                     action = i;
-                    return;
+                    break;
                 }
             }
         }
@@ -202,8 +217,8 @@ public class Humon : UnityAgent
             case 1: AddSpin(legSpeed, l_UpperLeg); break;
             case 2: AddSpin(legSpeed, r_LowerLeg); break;
             case 3: AddSpin(legSpeed, r_UpperLeg); break;
+            default: Debug.LogError("Invalid action"); break;
         }
-
-        Policy.Update()
+        prevAction = action;
     }
 }
