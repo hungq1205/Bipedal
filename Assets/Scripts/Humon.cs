@@ -3,23 +3,23 @@ using System.Collections;
 using UnityEngine;
 using TMPro;
 using BFLib.AI;
+using BFLib.AI.RL;
 
 public class Humon : UnityAgent
 {
-    static INeuralNetwork defaultPolicy;
-
     public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg;
     public TextMeshProUGUI scoreUI;
 
     public float learningRate = 0.01f;
     public float actionFreq = 2;
     public float legSpeed = 13f;
+    public bool deterministic;
 
     bool active;
     float elapsed = 0;
 
     float _score;
-    public override float score
+    public float Score
     {
         get => _score;
         set
@@ -38,21 +38,24 @@ public class Humon : UnityAgent
 
         active = false;
         StartCoroutine(WaitActive());
+        Policy = GetDefaultPolicy();
+        PolicyOpt = new PolicyGradient(policy);
     }
 
     void FixedUpdate()
     {
+        Score = Env.Evaluate(this);
         if (active)
         {
             elapsed += Time.fixedDeltaTime;
             if (elapsed * actionFreq > 1)
                 return;
             elapsed = 0;
-
+            TakeAction();
         }
     }
 
-    public override INeuralNetwork GetDefaultNeuralNetwork()
+    public override IPolicy GetDefaultPolicy()
     {
         if(defaultPolicy == null)
         {
@@ -103,6 +106,7 @@ public class Humon : UnityAgent
         body.transform.localRotation = Quaternion.identity;
 
         gameObject.SetActive(true);
+        IsKilled = false;
     }
 
     void SetHingeMotorSpeed(Rigidbody2D target, float value)
@@ -134,8 +138,9 @@ public class Humon : UnityAgent
 
     public override void Kill()
     {
-        OnKilled();
+        IsKilled = true;
         gameObject.SetActive(false);
+        Score = Env.Evaluate(this);
     }
 
     public override void Hide(bool value)
@@ -153,9 +158,9 @@ public class Humon : UnityAgent
         return body.transform;
     }
 
-    public override (float[], float) TakeAction(int action)
+    public override void TakeAction()
     {
-        var outputs = policy.Forward(new float[] {
+        var outputs = Policy.Forward(new float[] {
                 GetPartSignedAngle(l_LowerLeg),
                 GetPartSignedAngle(l_UpperLeg),
                 GetPartSignedAngle(r_LowerLeg),
@@ -163,11 +168,42 @@ public class Humon : UnityAgent
                 GetPos().y
             });
 
-        AddSpin(outputs.outputs[0][0] * legSpeed, l_LowerLeg);
-        AddSpin(outputs.outputs[0][1] * legSpeed, l_UpperLeg);
-        AddSpin(outputs.outputs[0][2] * legSpeed, r_LowerLeg);
-        AddSpin(outputs.outputs[0][3] * legSpeed, r_UpperLeg);
+        int action = -1;
 
-        OnActionMade();
+        if (deterministic)
+        {
+            float max = -1;
+            for (int i = 0; i < outputs.Length; i++)
+            {
+                if (max < outputs[i])
+                {
+                    max = outputs[i];
+                    action = i;
+                }
+            }
+        }
+        else
+        {
+            float rand = UnityEngine.Random.Range(0, 1f);
+            for (int i = 0; i < outputs.Length; i++)
+            {
+                rand -= outputs[i];
+                if (rand <= 0)
+                {
+                    action = i;
+                    return;
+                }
+            }
+        }
+
+        switch (action)
+        {
+            case 0: AddSpin(legSpeed, l_LowerLeg); break;
+            case 1: AddSpin(legSpeed, l_UpperLeg); break;
+            case 2: AddSpin(legSpeed, r_LowerLeg); break;
+            case 3: AddSpin(legSpeed, r_UpperLeg); break;
+        }
+
+        Policy.Update()
     }
 }

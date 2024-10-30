@@ -30,23 +30,23 @@ namespace BFLib
             WeightMatrix[] Weights { get; }
             ForwardResult Log { get; set; }
 
-            float[] IPolicy.GetActionProbs(float[] obs)
+            float[] IPolicy.Forward(float[] obs)
             {
-                Log = Forward(obs);
+                Log = ForwardLog(obs);
                 return Log.outputs[0];
             }
 
-            void IPolicy.Backward(float[] loss)
+            void IPolicy.Update(float[] loss)
             {
                 Backward(loss, Log);
             }
 
-            ForwardResult Forward(float[] inputs);
+            ForwardResult ForwardLog(float[] inputs);
 
             /// <summary>
             /// Input batch forwarding
             /// </summary>
-            ForwardResult Forward(float[][] inputs);
+            ForwardResult ForwardLog(float[][] inputs);
 
             /// <summary>
             /// Backpropagates and updates weights, biases
@@ -161,7 +161,7 @@ namespace BFLib
                 }
             }
 
-            public ForwardResult Forward(float[] inputs)
+            public ForwardResult ForwardLog(float[] inputs)
             {
                 float[][][] layerInputs = new float[Layers.LongLength][][];
                 float[] outputs = ForwardLayers(inputs, Layers.Length - 1, 0, ref layerInputs);
@@ -169,7 +169,7 @@ namespace BFLib
                 return new ForwardResult(layerInputs, new float[][] { outputs });
             }
 
-            public ForwardResult Forward(float[][] inputs)
+            public ForwardResult ForwardLog(float[][] inputs)
             {
                 float[][][] layerInputs = new float[Layers.LongLength][][];
                 float[][] outputs = ForwardLayers(inputs, Layers.Length - 1, 0, ref layerInputs);
@@ -1543,10 +1543,12 @@ namespace BFLib
 
                 void Init();
 
+                float Evaluate(IAgent agent);
+
                 /// <summary>
                 /// Reset all including environment and agents
                 /// </summary>
-                void Reset();
+                void ResetStates();
             }
 
             public interface IAgent
@@ -1561,19 +1563,20 @@ namespace BFLib
                 void ResetStates();
 
                 /// <returns><b>Observation</b> as float[] and <b>reward</b> as float</returns>
-                (float[], float) TakeAction(int action);
+                void TakeAction();
+
             }
 
             public interface IPolicy
             {
-                float[] GetActionProbs(float[] obs);
+                float[] Forward(float[] obs);
 
-                void Backward(float[] loss);
+                void Update(float[] loss);
             }
 
             public interface IPolicyOptimization
             {
-                INeuralNetwork Param { get; }
+                IPolicy Param { get; }
 
                 int GetAction(float[] actProbs);
 
@@ -1591,7 +1594,7 @@ namespace BFLib
 
             public class PolicyGradient : IPolicyOptimization
             {
-                public INeuralNetwork Param { get; private set; }
+                public IPolicy Param { get; private set; }
 
                 public PolicyGradient(INeuralNetwork param)
                 {
@@ -1604,9 +1607,9 @@ namespace BFLib
                 {
                     float[] outputs;
                     if (logits)
-                        outputs = Param.Forward(obs).outputs[0];
+                        outputs = Param.Forward(obs);
                     else
-                        outputs = ActivationLayer.ForwardActivation(ActivationFunc.Softmax, Param.Forward(obs).outputs[0]);
+                        outputs = ActivationLayer.ForwardActivation(ActivationFunc.Softmax, Param.Forward(obs));
 
                     for (int i = 0; i < outputs.Length; i++)
                         outputs[i] = MathF.Log(outputs[action]) * mass;

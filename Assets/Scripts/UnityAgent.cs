@@ -5,13 +5,10 @@ using UnityEngine;
 
 public abstract class UnityAgent : MonoBehaviour, IAgent
 {
-    public event Action<IAgent> onKilled, onActionMade;
-
-    public virtual float score { get; set; }
-    public INeuralNetwork policy { get; set; }
     public IEnvironment Env { get; private set; }
-    public IPolicy Policy { get; private set; }
+    public IPolicy Policy { get; set; }
     public IPolicyOptimization PolicyOpt { get; private set; }
+    public bool IsKilled { get; protected set; }
 
     public abstract void Kill();
 
@@ -23,13 +20,9 @@ public abstract class UnityAgent : MonoBehaviour, IAgent
 
     public abstract void SetPos(Vector2 pos);
 
-    public abstract INeuralNetwork GetDefaultNeuralNetwork();
+    public abstract IPolicy GetDefaultPolicy();
 
     public abstract void ResetStates();
 
-    public abstract (float[], float) TakeAction(int action);
-
-    protected void OnActionMade() => onActionMade?.Invoke(this);
-
-    protected void OnKilled() => onKilled?.Invoke(this);
+    public abstract void TakeAction();
 }

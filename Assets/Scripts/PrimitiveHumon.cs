@@ -42,7 +42,7 @@ public class PrimitiveHumon : UnityAgent
     {
         if (active)
         {
-            float[] outputs = policy.Predict(GetLegSignedAngle(true), GetLegSignedAngle(false), body.position.y);
+            float[] outputs = Policy.Predict(GetLegSignedAngle(true), GetLegSignedAngle(false), body.position.y);
 
             AddSpin(outputs[0] * legSpeed, true);
             AddSpin(outputs[1] * legSpeed, false);
