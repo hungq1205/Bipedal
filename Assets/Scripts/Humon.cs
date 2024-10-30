@@ -2,24 +2,21 @@ using System;
 using System.Collections;
 using UnityEngine;
 using TMPro;
-using BTLib.AI.NeuroEvolution;
+using BFLib.AI;
 
 public class Humon : UnityAgent
 {
-    NEAT_NN.NEAT_TopologyMutationRateInfo rateInfo = new NEAT_NN.NEAT_TopologyMutationRateInfo(
-        addCon: .2f,
-        removeCon: .2f,
-        addNodeToCon: .15f
-        );
-
     static INeuralNetwork defaultPolicy;
 
     public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg;
     public TextMeshProUGUI scoreUI;
 
+    public float learningRate = 0.01f;
+    public float actionFreq = 2;
     public float legSpeed = 13f;
 
     bool active;
+    float elapsed = 0;
 
     float _score;
     public override float score
@@ -47,32 +44,34 @@ public class Humon : UnityAgent
     {
         if (active)
         {
-            float[] outputs = policy.Predict(
-                GetPartSignedAngle(l_LowerLeg),
-                GetPartSignedAngle(l_UpperLeg),
-                GetPartSignedAngle(r_LowerLeg),
-                GetPartSignedAngle(r_UpperLeg),
-                GetPos().y
-                );
+            elapsed += Time.fixedDeltaTime;
+            if (elapsed * actionFreq > 1)
+                return;
+            elapsed = 0;
 
-            AddSpin(outputs[0] * legSpeed, l_LowerLeg);
-            AddSpin(outputs[1] * legSpeed, l_UpperLeg);
-            AddSpin(outputs[2] * legSpeed, r_LowerLeg);
-            AddSpin(outputs[3] * legSpeed, r_UpperLeg);
-
-            OnActionMade();
         }
     }
 
     public override INeuralNetwork GetDefaultNeuralNetwork()
     {
         if(defaultPolicy == null)
-            defaultPolicy = new NEAT_NN(new NEAT_NN.Genotype(5, 4, ActivationFunc.Linear, ActivationFunc.Tanh), rateInfo);
+        {
+            Optimizer opt = new Adam(learningRate: learningRate);
 
-        return defaultPolicy.DeepClone();
+            DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(5);
+            builder.NewLayers(
+                new ActivationLayer(32, ActivationFunc.ReLU),
+                new ActivationLayer(32, ActivationFunc.ReLU),
+                new ActivationLayer(32, ActivationFunc.ReLU),
+                new ActivationLayer(4, ActivationFunc.Softmax)
+            );
+            defaultPolicy = new DenseNeuralNetwork(builder, opt);
+        }
+
+        return defaultPolicy;
     }
 
-    public override void ResetPhenotype()
+    public override void ResetStates()
     {
         l_LowerLeg.transform.localPosition = new Vector2(-0.977177024f, -0.946023107f);
         l_LowerLeg.angularVelocity = 0;
@@ -152,5 +151,23 @@ public class Humon : UnityAgent
     public override Transform GetAgentTransform()
     {
         return body.transform;
+    }
+
+    public override (float[], float) TakeAction(int action)
+    {
+        var outputs = policy.Forward(new float[] {
+                GetPartSignedAngle(l_LowerLeg),
+                GetPartSignedAngle(l_UpperLeg),
+                GetPartSignedAngle(r_LowerLeg),
+                GetPartSignedAngle(r_UpperLeg),
+                GetPos().y
+            });
+
+        AddSpin(outputs.outputs[0][0] * legSpeed, l_LowerLeg);
+        AddSpin(outputs.outputs[0][1] * legSpeed, l_UpperLeg);
+        AddSpin(outputs.outputs[0][2] * legSpeed, r_LowerLeg);
+        AddSpin(outputs.outputs[0][3] * legSpeed, r_UpperLeg);
+
+        OnActionMade();
     }
 }

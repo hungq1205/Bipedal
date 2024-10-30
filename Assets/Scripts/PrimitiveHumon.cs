@@ -1,11 +1,9 @@
 using BTLib.AI;
 using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using BTLib.AI.NeuroEvolution;
-using Newtonsoft.Json.Linq;
 
-public class PremitiveHumon : UnityAgent
+public class PrimitiveHumon : UnityAgent
 {
     NEAT_NN.NEAT_TopologyMutationRateInfo rateInfo = new NEAT_NN.NEAT_TopologyMutationRateInfo(
         addCon: .2f,

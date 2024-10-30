@@ -1,1963 +1,3399 @@
-﻿using BTLib.AI.NeuroEvolution;
-using Newtonsoft.Json.Linq;
-using System;
-using System.Collections;
+﻿using BFLib.AI.RL;
+using BFLib.Utility;
 using System.Collections.Generic;
+using System.IO;
+using System;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.Serialization;
-using Unity.Mathematics;
-using Unity.VisualScripting;
-using UnityEngine;
-using UnityEngine.UIElements;
-using UnityEngine.Windows;
-using static BTLib.AI.NeuroEvolution.NEAT_NN;
-using static UnityEditor.Experimental.AssetDatabaseExperimental.AssetDatabaseCounters;
 
-namespace BTLib
+namespace BFLib
 {
     namespace AI
     {
-        namespace NeuroEvolution
+        public class ForwardResult
         {
-            public static class GlobalVar
+            public float[][][] layerInputs;
+            public float[][] outputs;
+
+            public ForwardResult(float[][][] layerInputs, float[][] outputs)
             {
-                public const int ActivationFuncCount = 8;
+                this.layerInputs = layerInputs;
+                this.outputs = outputs;
+            }
+        }
 
-                public static NEAT_TopologyMutationRateInfo defaultRateInfo = new NEAT_TopologyMutationRateInfo(
-                    addCon: .05f,
-                    removeCon: .05f,
-                    addNodeToCon: .05f
-                    );
+        public interface INeuralNetwork : IPolicy
+        {
+            int InDim { get; }
+            int OutDim { get; }
+            Optimizer Optimizer { get; }
+            Layer[] Layers { get; }
+            WeightMatrix[] Weights { get; }
+            ForwardResult Log { get; set; }
 
-
-                public static NEAT_TopologyMutationRateInfo topologyExploreRateInfo = new NEAT_TopologyMutationRateInfo(
-                    addCon: .2f,
-                    removeCon: .05f,
-                    addNodeToCon: .15f
-                    );
-
-                public static float[] inputs = new float[5]
-                {
-                1.2f, 3.3f, .4f, 3.6f, 2.4f
-                };
+            float[] IPolicy.GetActionProbs(float[] obs)
+            {
+                Log = Forward(obs);
+                return Log.outputs[0];
             }
 
+            void IPolicy.Backward(float[] loss)
+            {
+                Backward(loss, Log);
+            }
+
+            ForwardResult Forward(float[] inputs);
+
+            /// <summary>
+            /// Input batch forwarding
+            /// </summary>
+            ForwardResult Forward(float[][] inputs);
+
+            /// <summary>
+            /// Backpropagates and updates weights, biases
+            /// </summary>
+            void Backward(float[] loss, ForwardResult forwardLog);
+
+            /// <summary>
+            /// Backpropagates and updates weights, biases in batches
+            /// </summary>
+            void Backward(float[][] loss, ForwardResult forwardLog);
+
+            /// <summary>
+            /// </summary>
+            /// <param name="func">Takes current weight as parameter and returns a new weight</param>
+            void WeightAssignForEach(Func<float, float> func);
+
+            /// <summary>
+            /// </summary>
+            /// <param name="func">Takes current bias as parameter and returns a new bias</param>
+            void BiasAssignForEach(Func<float, float> func);
+        }
+
+        public class DenseNeuralNetwork : INeuralNetwork
+        {
+            public int InDim { get; private set; }
+            public int OutDim { get; private set; }
+            public Optimizer Optimizer { get; private set; }
+            public Layer[] Layers { get; private set; }
+            public WeightMatrix[] Weights { get; private set; }
+
+            public ForwardResult Log { get; set; }
+
+            public DenseNeuralNetwork(DenseNeuralNetworkBuilder builder, float learningRate, bool disposeAfterwards = true) : base()
+            {
+                Tuple<Layer[], WeightMatrix[]> bundle = builder.Build();
+
+                this.Layers = bundle.Item1;
+                this.Weights = bundle.Item2;
+                this.Optimizer = new SGD(learningRate);
+                this.InDim = Layers[0].dim;
+                this.OutDim = Layers[Layers.LongLength - 1].dim;
+
+                foreach (var layer in Layers)
+                    layer.Build(this);
+
+                foreach (var weight in Weights)
+                    weight.Build(this);
+
+                Optimizer.Init(this);
+
+                if (disposeAfterwards)
+                    builder.Dispose();
+            }
+
+            public DenseNeuralNetwork(DenseNeuralNetworkBuilder builder, Optimizer optimizer, bool disposeAfterwards = true) : base()
+            {
+                Tuple<Layer[], WeightMatrix[]> bundle = builder.Build();
+
+                this.Layers = bundle.Item1;
+                this.Weights = bundle.Item2;
+                this.Optimizer = optimizer;
+                this.InDim = Layers[0].dim;
+                this.OutDim = Layers[Layers.LongLength - 1].dim;
+
+                foreach (var layer in Layers)
+                    layer.Build(this);
+
+                foreach (var weight in Weights)
+                    weight.Build(this);
+
+                optimizer.Init(this);
+
+                if (disposeAfterwards)
+                    builder.Dispose();
+            }
+
+            public void WeightAssignForEach(Func<float, float> func)
+            {
+                for (int i = 0; i < Weights.LongLength; i++)
+                    Weights[i].AssignForEach((inIndex, outIndex, weight) => func(weight));
+            }
+
+            public void BiasAssignForEach(Func<float, float> func)
+            {
+                for (int i = 0; i < Layers.LongLength; i++)
+                    for (int j = 0; j < Layers[i].dim; j++)
+                        Layers[i].SetBias(j, func(Layers[i].GetBias(j)));
+            }
+
+            public void Backward(float[] loss, ForwardResult forwardLog)
+            {
+                float[][] temp = new float[1][];
+                temp[0] = loss;
+
+                Layers[Layers.Length - 1].GradientDescent(ref temp, forwardLog, Optimizer);
+
+                for (int i = Layers.Length - 2; i > -1; i--)
+                {
+                    Weights[i].GradientDescent(ref temp, forwardLog, Optimizer);
+                    Layers[i].GradientDescent(ref temp, forwardLog, Optimizer);
+                }
+            }
+
+            public void Backward(float[][] loss, ForwardResult forwardLog)
+            {
+                Layers[Layers.Length - 1].GradientDescent(ref loss, forwardLog, Optimizer);
+
+                for (int i = Layers.Length - 2; i > -1; i--)
+                {
+                    Weights[i].GradientDescent(ref loss, forwardLog, Optimizer);
+                    Layers[i].GradientDescent(ref loss, forwardLog, Optimizer);
+                }
+            }
+
+            public ForwardResult Forward(float[] inputs)
+            {
+                float[][][] layerInputs = new float[Layers.LongLength][][];
+                float[] outputs = ForwardLayers(inputs, Layers.Length - 1, 0, ref layerInputs);
+
+                return new ForwardResult(layerInputs, new float[][] { outputs });
+            }
+
+            public ForwardResult Forward(float[][] inputs)
+            {
+                float[][][] layerInputs = new float[Layers.LongLength][][];
+                float[][] outputs = ForwardLayers(inputs, Layers.Length - 1, 0, ref layerInputs);
+
+                return new ForwardResult(layerInputs, outputs);
+            }
+
+            float[] ForwardLayers(float[] inputs, int toLayer, int fromLayer, ref float[][][] layerInputs)
+            {
+                layerInputs[toLayer] = new float[1][];
+
+                if (fromLayer < toLayer)
+                    layerInputs[toLayer][0] = Weights[toLayer - 1].Forward(ForwardLayers(inputs, toLayer - 1, fromLayer, ref layerInputs));
+                else
+                    layerInputs[toLayer][0] = inputs;
+
+                return Layers[toLayer].Forward(layerInputs[toLayer][0]);
+            }
+
+            float[][] ForwardLayers(float[][] inputs, int toLayer, int fromLayer, ref float[][][] layerInputs)
+            {
+                if (fromLayer < toLayer)
+                    layerInputs[toLayer] = Weights[toLayer - 1].Forward(ForwardLayers(inputs, toLayer - 1, fromLayer, ref layerInputs));
+                else
+                    layerInputs[toLayer] = inputs;
+
+                return Layers[toLayer].Forward(layerInputs[toLayer]);
+            }
+
+        }
+
+        public class DenseNeuralNetworkBuilder : INeuralNetworkBuilder
+        {
+            public List<Layer> layers;
+
+            public DenseNeuralNetworkBuilder(int inputDim)
+            {
+                layers = new List<Layer>();
+
+                layers.Add(new Layer(inputDim, false));
+            }
+
+            public void NewLayers(params Layer[] dims)
+            {
+                foreach (Layer dim in dims)
+                    NewLayer(dim);
+            }
+
+            public void NewLayer(int dim)
+            {
+                layers.Add(new Layer(dim));
+            }
+
+            public void NewLayer(Layer layer)
+            {
+                layers.Add(layer);
+            }
+
+            public Tuple<Layer[], WeightMatrix[]> Build()
+            {
+                WeightMatrix[] weights = new WeightMatrix[layers.Count - 1];
+
+                for (int i = 1; i < layers.Count; i++)
+                {
+                    if (layers[i - 1] is ForwardLayer && ((ForwardLayer)layers[i - 1]).port != ForwardLayer.ForwardPort.In)
+                        weights[i - 1] = layers[i - 1].GenerateWeightMatrix();
+                    else
+                        weights[i - 1] = layers[i].GenerateWeightMatrix();
+                }
+
+                return (layers.ToArray(), weights).ToTuple();
+            }
+
+            public void Dispose()
+            {
+                GC.SuppressFinalize(this);
+            }
+        }
+
+        public interface INeuralNetworkBuilder : IDisposable
+        {
+            abstract Tuple<Layer[], WeightMatrix[]> Build();
+        }
+
+        #region Optimizer
+
+        public interface IBatchNormOptimizable
+        {
+            public Dictionary<int, int> bnIndexLookup { get; }
+
+            public float GammaUpdate(int layerIndex, float gradient);
+
+            public float BetaUpdate(int layerIndex, float gradient);
+        }
+
+        public abstract class Optimizer
+        {
+            public DenseNeuralNetwork network;
+            public float weightDecay;
+
+            public Optimizer(float weightDecay = 0)
+            {
+                this.weightDecay = weightDecay;
+            }
+
+            public virtual void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+            }
+
+            public abstract float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient);
+
+            public abstract float BiasUpdate(int layerIndex, int perceptron, float gradient);
+        }
+
+        public class SGD : Optimizer, IBatchNormOptimizable
+        {
+            public float learningRate;
+            public Dictionary<int, int> bnIndexLookup { get; private set; }
+
+            public SGD(float learningRate, float weightDecay = 0) : base(weightDecay)
+            {
+                this.learningRate = learningRate;
+            }
+
+            public override void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+            }
+
+            public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
+            {
+                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) * (1 - weightDecay) - gradient * learningRate;
+            }
+
+            public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
+            {
+                return network.Layers[layerIndex].GetBias(perceptron) - gradient * learningRate;
+            }
+
+            public float GammaUpdate(int layerIndex, float gradient)
+            {
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - gradient * learningRate;
+            }
+
+            public float BetaUpdate(int layerIndex, float gradient)
+            {
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - gradient * learningRate;
+            }
+        }
+
+        public class Momentum : Optimizer, IBatchNormOptimizable
+        {
+            public float[][][] weightMomentum;
+            public float[][] biasMomentum;
+            public float learningRate, beta;
+
+            public Dictionary<int, int> bnIndexLookup { get; private set; }
+            public float[] gammaMomentum, betaMomentum;
+
+            public Momentum(float beta = 0.9f, float learningRate = 0.01f, float weightDecay = 0) : base(weightDecay)
+            {
+                this.learningRate = learningRate;
+                this.beta = beta;
+            }
+
+            public override void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+
+                weightMomentum = new float[network.Weights.Length][][];
+                for (int i = 0; i < network.Weights.Length; i++)
+                {
+                    weightMomentum[i] = new float[network.Weights[i].outDim][];
+                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    {
+                        weightMomentum[i][j] = new float[network.Weights[i].inDim];
+                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                            weightMomentum[i][j][k] = 0.000001f; // epsilon = 10^-6
+                    }
+                }
+
+                bnIndexLookup = new Dictionary<int, int>();
+
+                biasMomentum = new float[network.Layers.Length][];
+                for (int i = 0; i < network.Layers.Length; i++)
+                {
+                    biasMomentum[i] = new float[network.Layers[i].dim];
+                    for (int j = 0; j < network.Layers[i].dim; j++)
+                        biasMomentum[i][j] = 0.000001f; // epsilon = 10^-6
+
+                    if (network.Layers[i] is BatchNormLayer)
+                        bnIndexLookup.Add(i, bnIndexLookup.Count);
+                }
+
+                gammaMomentum = new float[bnIndexLookup.Count];
+                betaMomentum = new float[bnIndexLookup.Count];
+            }
+
+            public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
+            {
+                weightMomentum[weightsIndex][outIndex][inIndex] =
+                    beta * weightMomentum[weightsIndex][outIndex][inIndex] +
+                    (1 - beta) * (gradient + weightDecay * network.Weights[weightsIndex].GetWeight(inIndex, outIndex));
+
+                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - learningRate * weightMomentum[weightsIndex][outIndex][inIndex];
+            }
+
+            public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
+            {
+                biasMomentum[layerIndex][perceptron] = beta * biasMomentum[layerIndex][perceptron] + (1 - beta) * gradient;
+
+                return network.Layers[layerIndex].GetBias(perceptron) - learningRate * biasMomentum[layerIndex][perceptron];
+            }
+
+            public float GammaUpdate(int layerIndex, float gradient)
+            {
+                gammaMomentum[bnIndexLookup[layerIndex]] = beta * gammaMomentum[bnIndexLookup[layerIndex]] + (1 - beta) * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - learningRate * gammaMomentum[bnIndexLookup[layerIndex]];
+            }
+
+            public float BetaUpdate(int layerIndex, float gradient)
+            {
+                betaMomentum[bnIndexLookup[layerIndex]] = beta * betaMomentum[bnIndexLookup[layerIndex]] + (1 - beta) * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - learningRate * betaMomentum[bnIndexLookup[layerIndex]];
+            }
+        }
+
+        public class RMSprop : Optimizer, IBatchNormOptimizable
+        {
+            public float[][][] accumWeightGrad;
+            public float[][] accumBiasGrad;
+            public float learningRate, beta;
+
+            public Dictionary<int, int> bnIndexLookup { get; private set; }
+            public float[] accumGammaGrad, accumBetaGrad;
+
+            public RMSprop(float beta = 0.99f, float learningRate = 0.01f, float weightDecay = 0) : base(weightDecay)
+            {
+                this.learningRate = learningRate;
+                this.beta = beta;
+            }
+
+            public override void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+
+                accumWeightGrad = new float[network.Weights.Length][][];
+                for (int i = 0; i < network.Weights.Length; i++)
+                {
+                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
+                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    {
+                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
+                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                            accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
+                    }
+                }
+
+                bnIndexLookup = new Dictionary<int, int>();
+
+                accumBiasGrad = new float[network.Layers.Length][];
+                for (int i = 0; i < network.Layers.Length; i++)
+                {
+                    accumBiasGrad[i] = new float[network.Layers[i].dim];
+                    for (int j = 0; j < network.Layers[i].dim; j++)
+                        accumBiasGrad[i][j] = 0.000001f; // epsilon = 10^-6
+
+                    if (network.Layers[i] is BatchNormLayer)
+                        bnIndexLookup.Add(i, bnIndexLookup.Count);
+                }
+
+                accumGammaGrad = new float[bnIndexLookup.Count];
+                accumBetaGrad = new float[bnIndexLookup.Count];
+            }
+
+            public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
+            {
+                accumWeightGrad[weightsIndex][outIndex][inIndex] =
+                    beta * accumWeightGrad[weightsIndex][outIndex][inIndex] +
+                    (1 - beta) * (gradient * gradient + weightDecay * network.Weights[weightsIndex].GetWeight(inIndex, outIndex));
+
+                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - (learningRate * gradient / MathF.Sqrt(accumWeightGrad[weightsIndex][outIndex][inIndex]));
+            }
+
+            public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
+            {
+                accumBiasGrad[layerIndex][perceptron] = beta * accumBiasGrad[layerIndex][perceptron] + (1 - beta) * gradient * gradient;
+
+                return network.Layers[layerIndex].GetBias(perceptron) - (learningRate * gradient / MathF.Sqrt(accumBiasGrad[layerIndex][perceptron]));
+            }
+
+            public float GammaUpdate(int layerIndex, float gradient)
+            {
+                accumGammaGrad[bnIndexLookup[layerIndex]] = beta * accumGammaGrad[bnIndexLookup[layerIndex]] + (1 - beta) * gradient * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - (learningRate * gradient / MathF.Sqrt(accumGammaGrad[bnIndexLookup[layerIndex]]));
+            }
+
+            public float BetaUpdate(int layerIndex, float gradient)
+            {
+                accumBetaGrad[bnIndexLookup[layerIndex]] = beta * accumBetaGrad[bnIndexLookup[layerIndex]] + (1 - beta) * gradient * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - (learningRate * gradient / MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]]));
+            }
+        }
+
+        public class Adam : Optimizer, IBatchNormOptimizable
+        {
+            public float[][][] accumWeightGrad, weightMomentum;
+            public float[][] accumBiasGrad, biasMomentum;
+            public float learningRate, beta1, beta2;
+
+            public Dictionary<int, int> bnIndexLookup { get; private set; }
+            public float[] accumGammaGrad, gammaMomentum, accumBetaGrad, betaMomentum;
+
+            public Adam(float beta1 = 0.9f, float beta2 = 0.99f, float learningRate = 0.01f, float weightDecay = 0) : base(weightDecay)
+            {
+                this.learningRate = learningRate;
+                this.beta1 = beta1;
+                this.beta2 = beta2;
+            }
+
+            public override void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+
+                weightMomentum = new float[network.Weights.Length][][];
+                accumWeightGrad = new float[network.Weights.Length][][];
+                for (int i = 0; i < network.Weights.Length; i++)
+                {
+                    weightMomentum[i] = new float[network.Weights[i].outDim][];
+                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
+                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    {
+                        weightMomentum[i][j] = new float[network.Weights[i].inDim];
+                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
+                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                        {
+                            weightMomentum[i][j][k] = 0.000001f; // epsilon = 10^-6
+                            accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
+                        }
+                    }
+                }
+
+                bnIndexLookup = new Dictionary<int, int>();
+
+                biasMomentum = new float[network.Layers.Length][];
+                accumBiasGrad = new float[network.Layers.Length][];
+                for (int i = 0; i < network.Layers.Length; i++)
+                {
+                    biasMomentum[i] = new float[network.Layers[i].dim];
+                    accumBiasGrad[i] = new float[network.Layers[i].dim];
+                    for (int j = 0; j < network.Layers[i].dim; j++)
+                    {
+                        biasMomentum[i][j] = 0.000001f; // epsilon = 10^-6
+                        accumBiasGrad[i][j] = 0.000001f; // epsilon = 10^-6
+                    }
+
+                    if (network.Layers[i] is BatchNormLayer)
+                        bnIndexLookup.Add(i, bnIndexLookup.Count);
+                }
+
+                gammaMomentum = new float[bnIndexLookup.Count];
+                accumGammaGrad = new float[bnIndexLookup.Count];
+                betaMomentum = new float[bnIndexLookup.Count];
+                accumBetaGrad = new float[bnIndexLookup.Count];
+            }
+
+            public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
+            {
+                weightMomentum[weightsIndex][outIndex][inIndex] =
+                    beta1 * weightMomentum[weightsIndex][outIndex][inIndex] +
+                    (1 - beta1) * (gradient + weightDecay * network.Weights[weightsIndex].GetWeight(inIndex, outIndex));
+
+                accumWeightGrad[weightsIndex][outIndex][inIndex] =
+                    beta2 * accumWeightGrad[weightsIndex][outIndex][inIndex] +
+                    (1 - beta2) * (gradient * gradient + weightDecay * network.Weights[weightsIndex].GetWeight(inIndex, outIndex));
+
+                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - (learningRate * weightMomentum[weightsIndex][outIndex][inIndex] / MathF.Sqrt(accumWeightGrad[weightsIndex][outIndex][inIndex]));
+            }
+
+            public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
+            {
+                biasMomentum[layerIndex][perceptron] = beta1 * biasMomentum[layerIndex][perceptron] + (1 - beta1) * gradient;
+                accumBiasGrad[layerIndex][perceptron] = beta2 * accumBiasGrad[layerIndex][perceptron] + (1 - beta2) * gradient * gradient;
+
+                return network.Layers[layerIndex].GetBias(perceptron) - (learningRate * biasMomentum[layerIndex][perceptron] / MathF.Sqrt(accumBiasGrad[layerIndex][perceptron]));
+            }
+
+            public float GammaUpdate(int layerIndex, float gradient)
+            {
+                gammaMomentum[bnIndexLookup[layerIndex]] = beta1 * gammaMomentum[bnIndexLookup[layerIndex]] + (1 - beta1) * gradient;
+                accumGammaGrad[bnIndexLookup[layerIndex]] = beta2 * accumGammaGrad[bnIndexLookup[layerIndex]] + (1 - beta2) * gradient * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - (learningRate * gammaMomentum[bnIndexLookup[layerIndex]] / MathF.Sqrt(accumGammaGrad[bnIndexLookup[layerIndex]]));
+            }
+
+            public float BetaUpdate(int layerIndex, float gradient)
+            {
+                betaMomentum[bnIndexLookup[layerIndex]] = beta1 * betaMomentum[bnIndexLookup[layerIndex]] + (1 - beta1) * gradient;
+                accumBetaGrad[bnIndexLookup[layerIndex]] = beta2 * accumBetaGrad[bnIndexLookup[layerIndex]] + (1 - beta2) * gradient * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - (learningRate * betaMomentum[bnIndexLookup[layerIndex]] / MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]]));
+            }
+        }
+
+        public class AdaGrad : Optimizer, IBatchNormOptimizable
+        {
+            public float[][][] accumWeightGrad;
+            public float[][] accumBiasGrad;
+            public float eta;
+
+            public Dictionary<int, int> bnIndexLookup { get; private set; }
+            public float[] accumGammaGrad, accumBetaGrad;
+
+            public AdaGrad(float eta = 0.01f, float weightDecay = 0) : base(weightDecay)
+            {
+                this.eta = eta;
+            }
+
+            public override void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+
+                accumWeightGrad = new float[network.Weights.Length][][];
+                for (int i = 0; i < network.Weights.Length; i++)
+                {
+                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
+                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    {
+                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
+                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                            accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
+                    }
+                }
+
+                bnIndexLookup = new Dictionary<int, int>();
+
+                accumBiasGrad = new float[network.Layers.Length][];
+                for (int i = 0; i < network.Layers.Length; i++)
+                {
+                    accumBiasGrad[i] = new float[network.Layers[i].dim];
+                    for (int j = 0; j < network.Layers[i].dim; j++)
+                        accumBiasGrad[i][j] = 0.000001f; // epsilon = 10^-6
+
+                    if (network.Layers[i] is BatchNormLayer)
+                        bnIndexLookup.Add(i, bnIndexLookup.Count);
+                }
+
+                accumGammaGrad = new float[bnIndexLookup.Count];
+                accumBetaGrad = new float[bnIndexLookup.Count];
+            }
+
+            public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
+            {
+                accumWeightGrad[weightsIndex][outIndex][inIndex] += gradient * gradient;
+
+                return (1 - weightDecay) * network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - (eta / MathF.Sqrt(accumWeightGrad[weightsIndex][outIndex][inIndex])) * gradient;
+            }
+
+            public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
+            {
+                accumBiasGrad[layerIndex][perceptron] += gradient * gradient;
+
+                return network.Layers[layerIndex].GetBias(perceptron) - (eta / MathF.Sqrt(accumBiasGrad[layerIndex][perceptron])) * gradient;
+            }
+
+            public float GammaUpdate(int layerIndex, float gradient)
+            {
+                accumGammaGrad[bnIndexLookup[layerIndex]] += gradient * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - (eta / MathF.Sqrt(accumGammaGrad[bnIndexLookup[layerIndex]])) * gradient;
+            }
+
+            public float BetaUpdate(int layerIndex, float gradient)
+            {
+                accumBetaGrad[bnIndexLookup[layerIndex]] += gradient * gradient;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - (eta / MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]])) * gradient;
+            }
+        }
+
+        public class AdaDelta : Optimizer, IBatchNormOptimizable
+        {
+            public float[][][] accumWeightGrad, accumRescaledWeightGrad;
+            public float[][] accumBiasGrad, accumRescaledBiasGrad;
+            public float rho;
+
+            public Dictionary<int, int> bnIndexLookup { get; private set; }
+            public float[] accumGammaGrad, accumBetaGrad, accumRescaledGammaGrad, accumRescaledBetaGrad;
+
+            public AdaDelta(float rho = 0.9f, float weightDecay = 0) : base(weightDecay)
+            {
+                this.rho = rho;
+            }
+
+            public override void Init(DenseNeuralNetwork network)
+            {
+                this.network = network;
+
+                accumWeightGrad = new float[network.Weights.Length][][];
+                accumRescaledWeightGrad = new float[network.Weights.Length][][];
+                for (int i = 0; i < network.Weights.Length; i++)
+                {
+                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
+                    accumRescaledWeightGrad[i] = new float[network.Weights[i].outDim][];
+                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    {
+                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
+                        accumRescaledWeightGrad[i][j] = new float[network.Weights[i].inDim];
+                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                        {
+                            accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
+                            accumRescaledWeightGrad[i][j][k] = 0.0000001f;
+                        }
+                    }
+                }
+
+                bnIndexLookup = new Dictionary<int, int>();
+
+                accumBiasGrad = new float[network.Layers.Length][];
+                accumRescaledBiasGrad = new float[network.Layers.Length][];
+                for (int i = 0; i < network.Layers.Length; i++)
+                {
+                    accumBiasGrad[i] = new float[network.Layers[i].dim];
+                    accumRescaledBiasGrad[i] = new float[network.Layers[i].dim];
+                    for (int j = 0; j < network.Layers[i].dim; j++)
+                    {
+                        accumBiasGrad[i][j] = 0.000001f; // epsilon = 10^-6
+                        accumRescaledBiasGrad[i][j] = 0.0000001f;
+                    }
+
+                    if (network.Layers[i] is BatchNormLayer)
+                        bnIndexLookup.Add(i, bnIndexLookup.Count);
+                }
+
+                bool hasBatchNormLayer = false;
+                foreach (Layer layer in network.Layers)
+                    if (layer is BatchNormLayer)
+                    {
+                        hasBatchNormLayer = true;
+                        break;
+                    }
+
+                if (!hasBatchNormLayer)
+                    return;
+
+                accumGammaGrad = new float[bnIndexLookup.Count];
+                accumBetaGrad = new float[bnIndexLookup.Count];
+                accumRescaledGammaGrad = new float[bnIndexLookup.Count];
+                accumRescaledBetaGrad = new float[bnIndexLookup.Count];
+            }
+
+            public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
+            {
+                accumWeightGrad[weightsIndex][outIndex][inIndex] = rho * accumWeightGrad[weightsIndex][outIndex][inIndex] + (1 - rho) * gradient * gradient;
+
+                float rescaledGrad =
+                    MathF.Sqrt(accumRescaledWeightGrad[weightsIndex][outIndex][inIndex] / accumWeightGrad[weightsIndex][outIndex][inIndex]) * gradient +
+                    weightDecay * network.Weights[weightsIndex].GetWeight(inIndex, outIndex);
+                accumRescaledWeightGrad[weightsIndex][outIndex][inIndex] = rho * accumRescaledWeightGrad[weightsIndex][outIndex][inIndex] + (1 - rho) * rescaledGrad * rescaledGrad;
+
+                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - rescaledGrad;
+            }
+
+            public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
+            {
+                accumBiasGrad[layerIndex][perceptron] = rho * accumBiasGrad[layerIndex][perceptron] + (1 - rho) * gradient * gradient;
+
+                float rescaledGrad = MathF.Sqrt(accumRescaledBiasGrad[layerIndex][perceptron] / accumBiasGrad[layerIndex][perceptron]) * gradient;
+                accumRescaledBiasGrad[layerIndex][perceptron] = rho * accumRescaledBiasGrad[layerIndex][perceptron] + (1 - rho) * rescaledGrad * rescaledGrad;
+
+                return network.Layers[layerIndex].GetBias(perceptron) - rescaledGrad;
+            }
+
+            public float GammaUpdate(int layerIndex, float gradient)
+            {
+                accumGammaGrad[bnIndexLookup[layerIndex]] = rho * accumGammaGrad[bnIndexLookup[layerIndex]] + (1 - rho) * gradient * gradient;
+
+                float rescaledGrad = MathF.Sqrt(accumRescaledGammaGrad[bnIndexLookup[layerIndex]] / accumGammaGrad[bnIndexLookup[layerIndex]]) * gradient;
+                accumRescaledGammaGrad[bnIndexLookup[layerIndex]] = rho * accumRescaledGammaGrad[bnIndexLookup[layerIndex]] + (1 - rho) * rescaledGrad * rescaledGrad;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - rescaledGrad;
+            }
+
+            public float BetaUpdate(int layerIndex, float gradient)
+            {
+                accumBetaGrad[bnIndexLookup[layerIndex]] = rho * accumBetaGrad[bnIndexLookup[layerIndex]] + (1 - rho) * gradient * gradient;
+
+                float rescaledGrad = MathF.Sqrt(accumRescaledBetaGrad[bnIndexLookup[layerIndex]] / accumBetaGrad[bnIndexLookup[layerIndex]]) * gradient;
+                accumRescaledBetaGrad[bnIndexLookup[layerIndex]] = rho * accumRescaledBetaGrad[bnIndexLookup[layerIndex]] + (1 - rho) * rescaledGrad * rescaledGrad;
+
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - rescaledGrad;
+            }
+        }
+
+        #endregion
+
+        #region Layer
+
+        public enum ActivationFunc
+        {
+            ReLU,
+            Sigmoid,
+            Tanh,
+            NaturalLog,
+            Exponential,
+            Linear,
+            Softmax,
+            Custom
+        }
+
+        public class BatchNormLayer : ForwardLayer
+        {
+            public float gamma = 1, beta = 0;
+
+            public BatchNormLayer(ForwardPort port) : base(ActivationFunc.Custom, port, false) { }
+
+            public override float[][] Forward(float[][] inputs)
+            {
+                int sampleSize = inputs.Length;
+                float[][] result = new float[sampleSize][];
+
+                for (int sample = 0; sample < result.Length; sample++)
+                    result[sample] = new float[dim];
+
+                for (int i = 0; i < dim; i++)
+                {
+                    float mean = 0, variance = 0;
+
+                    for (int sample = 0; sample < sampleSize; sample++)
+                        mean += inputs[sample][i];
+                    mean /= sampleSize;
+
+                    for (int sample = 0; sample < sampleSize; sample++)
+                        variance += MathF.Pow(inputs[sample][i] - mean, 2);
+                    variance /= sampleSize;
+
+                    for (int sample = 0; sample < result.Length; sample++)
+                        result[sample][i] = ForwardComp(Standardize(inputs[sample][i], mean, variance));
+                }
+
+                return result;
+            }
+
+            public override float ForwardComp(float x)
+            {
+                return base.ForwardComp(x * gamma + beta);
+            }
+
+            public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
+            {
+                if (layerIndex == 0)
+                    return;
+
+                Layer prevLayer = network.Layers[layerIndex - 1];
+
+                int sampleSize = errors.Length;
+
+                float[] means = new float[dim];
+                float[] variances = new float[dim];
+
+                for (int i = 0; i < dim; i++)
+                {
+                    for (int sample = 0; sample < sampleSize; sample++)
+                        means[i] += log.layerInputs[layerIndex][sample][i];
+                    means[i] /= sampleSize;
+
+                    for (int sample = 0; sample < sampleSize; sample++)
+                        variances[i] += MathF.Pow(log.layerInputs[layerIndex][sample][i] - means[i], 2);
+                    variances[i] /= sampleSize;
+                    variances[i] += 0.000001f;
+                }
+
+                float[]
+                    dbeta = new float[dim],
+                    dgamma = new float[dim],
+                    dvariances = new float[dim],
+                    dmeans = new float[dim];
+
+                for (int i = 0; i < dim; i++)
+                {
+                    for (int sample = 0; sample < sampleSize; sample++)
+                    {
+                        dbeta[i] += errors[sample][i];
+                        dgamma[i] += errors[sample][i] * Standardize(log.layerInputs[layerIndex][sample][i], means[i], variances[i]);
+
+                        dvariances[i] += errors[sample][i] * (log.layerInputs[layerIndex][sample][i] - means[i]);
+                        dmeans[i] += errors[sample][i];
+                    }
+
+                    dvariances[i] *= (-0.5f) * gamma * MathF.Pow(variances[i], -1.5f);
+                    dvariances[i] += 0.000001f;
+
+                    dmeans[i] *= (gamma * sampleSize) / (MathF.Sqrt(variances[i]) * dvariances[i] * 2);
+                    // dmeans[i] = (-gamma) / MathF.Sqrt(variances[i]); 
+                    // dmeans[i] /= dvariances[i] * (-2) * (1 / sampleSize); 
+
+                    for (int sample = 0; sample < sampleSize; sample++)
+                        dmeans[i] += log.layerInputs[layerIndex][sample][i] - means[i];
+                    dmeans[i] *= dvariances[i] * (-2);
+                    dmeans[i] /= sampleSize;
+
+                    for (int sample = 0; sample < sampleSize; sample++)
+                        errors[sample][i] =
+                            (errors[sample][i] * gamma) / MathF.Sqrt(variances[i]) +
+                            dmeans[i] / sampleSize +
+                            (2 * dvariances[i] * (log.layerInputs[layerIndex][sample][i] - means[i])) / sampleSize;
+                }
+
+                for (int i = 0; i < dim; i++)
+                {
+                    gamma = ((IBatchNormOptimizable)optimizer).GammaUpdate(layerIndex, dgamma[i]);
+                    beta = ((IBatchNormOptimizable)optimizer).BetaUpdate(layerIndex, dbeta[i]);
+                }
+            }
+
+            public static float Standardize(float x, float mean, float variance, float zeroSub = 0.000001f) => variance != 0 ? (x - mean) / MathF.Sqrt(variance) : (x - mean) / zeroSub;
+
+        }
+
+        public class NormalizationLayer : ForwardLayer
+        {
+            public float gamma, beta;
+
+            public NormalizationLayer(float min, float max, ForwardPort port) : base(ActivationFunc.Custom, port, false)
+            {
+                gamma = 1 / (max - min);
+                beta = -min;
+            }
+
+            public override void GradientDescent(ref float[][] errors, ForwardResult result, Optimizer optimizer) { }
+
+            public override float ForwardComp(float x)
+            {
+                return base.ForwardComp(x * gamma + beta);
+            }
+        }
+
+        public class ForwardLayer : ActivationLayer
+        {
+            public enum ForwardPort
+            {
+                In,
+                Out,
+                Both
+            }
+
+            public readonly ForwardPort port;
+
+            public ForwardLayer(ActivationFunc func, ForwardPort port, bool useBias = true) : base(-1, func, useBias)
+            {
+                this.port = port;
+            }
+
+            public override void Build(INeuralNetwork network)
+            {
+                base.Build(network);
+
+                switch (port)
+                {
+                    case ForwardPort.In:
+                        dim = network.Layers[layerIndex - 1].dim;
+                        break;
+                    case ForwardPort.Out:
+                        dim = network.Layers[layerIndex + 1].dim;
+                        break;
+                    case ForwardPort.Both:
+                        if (network.Layers[layerIndex - 1].dim != network.Layers[layerIndex + 1].dim)
+                            throw new Exception("Nah forward layer dim");
+                        dim = network.Layers[layerIndex + 1].dim;
+                        break;
+                }
+
+                biases = new float[dim];
+            }
+
+            public override WeightMatrix GenerateWeightMatrix()
+            {
+                return new ForwardWeightMatrix(useBias);
+            }
+        }
+
+        public class ActivationLayer : Layer
+        {
+            public readonly ActivationFunc func;
+
+            public ActivationLayer(int dim, ActivationFunc func, bool useBias = true) : base(dim, useBias)
+            {
+                this.func = func;
+            }
+
+            public override float ForwardComp(float x)
+            {
+                return ForwardActivation(func, x);
+            }
+
+            public override float[] FunctionDifferential(float[] X, IEnumerator<float> offsets)
+            {
+                float[] temp = new float[X.Length];
+                for (int i = 0; i < X.Length; i++, offsets.MoveNext())
+                    temp[i] += offsets.Current;
+
+                return ActivationDifferential(func, temp);
+            }
+
+            public override float[] FunctionDifferential(float[] X)
+            {
+                return ActivationDifferential(func, X);
+            }
+
+            public override float FunctionDifferential(float x, float offset = 0)
+            {
+                return ActivationDifferential(func, x + offset);
+            }
+
+            public static float ActivationDifferential(ActivationFunc func, float x)
+            {
+                switch (func)
+                {
+                    case ActivationFunc.Sigmoid:
+                        float sigmoid = ForwardActivation(func, x);
+                        return sigmoid * (1 - sigmoid);
+                    case ActivationFunc.Tanh:
+                        float sqrExp = MathF.Exp(x);
+                        sqrExp *= sqrExp;
+                        return 4 / (sqrExp + (1 / sqrExp) + 2);
+                    case ActivationFunc.ReLU:
+                        return (x > 0) ? 1 : 0;
+                    case ActivationFunc.NaturalLog:
+                        return 1 / x;
+                    case ActivationFunc.Exponential:
+                        return MathF.Exp(x);
+                    case ActivationFunc.Softmax:
+                        return 0;
+                    case ActivationFunc.Linear:
+                    default:
+                        return 1;
+                }
+            }
+
+            public static float[] ActivationDifferential(ActivationFunc func, float[] X)
+            {
+                float[] result = new float[X.Length];
+                switch (func)
+                {
+                    case ActivationFunc.Sigmoid:
+                        for (int i = 0; i < X.Length; i++)
+                        {
+                            float sigmoid = ForwardActivation(func, X[i]);
+                            result[i] = sigmoid * (1 - sigmoid);
+                        }
+                        break;
+                    case ActivationFunc.Tanh:
+                        for (int i = 0; i < X.Length; i++)
+                        {
+                            float sqrExp = MathF.Exp(X[i]);
+                            sqrExp *= sqrExp;
+                            result[i] = 4 / (sqrExp + (1 / sqrExp) + 2);
+                        }
+                        break;
+                    case ActivationFunc.ReLU:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = (X[i] > 0) ? 1 : 0;
+                        break;
+                    case ActivationFunc.NaturalLog:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = 1 / X[i];
+                        break;
+                    case ActivationFunc.Exponential:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = MathF.Exp(X[i]);
+                        break;
+                    case ActivationFunc.Softmax:
+                        float[] softmax = ForwardActivation(func, X);
+                        for (int i = 0; i < X.Length; i++)
+                            for (int j = 0; j < X.Length; j++)
+                                result[i] += (i == j) ? softmax[i] * (1 - softmax[i]) : -softmax[i] * softmax[j];
+                        break;
+                    case ActivationFunc.Linear:
+                    default:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = 1;
+                        break;
+                }
+
+                return result;
+            }
+
+            public static float ForwardActivation(ActivationFunc func, float x)
+            {
+                switch (func)
+                {
+                    case ActivationFunc.Sigmoid:
+                        return 1 / (1 + MathF.Exp(-x));
+                    case ActivationFunc.Tanh:
+                        return MathF.Tanh(x);
+                    case ActivationFunc.ReLU:
+                        return (x > 0) ? x : 0;
+                    case ActivationFunc.NaturalLog:
+                        return MathF.Log(x);
+                    case ActivationFunc.Exponential:
+                        return MathF.Exp(x);
+                    case ActivationFunc.Softmax:
+                        return 1;
+                    case ActivationFunc.Linear:
+                    default:
+                        return x;
+                }
+            }
+
+            public static float[] ForwardActivation(ActivationFunc func, float[] X)
+            {
+                float[] result = new float[X.Length];
+                switch (func)
+                {
+                    case ActivationFunc.Sigmoid:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = 1 / (1 + MathF.Exp(-X[i]));
+                        break;
+                    case ActivationFunc.Tanh:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = MathF.Tanh(X[i]);
+                        break;
+                    case ActivationFunc.ReLU:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = (X[i] > 0) ? X[i] : 0;
+                        break;
+                    case ActivationFunc.NaturalLog:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = MathF.Log(X[i]);
+                        break;
+                    case ActivationFunc.Exponential:
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] = MathF.Exp(X[i]);
+                        break;
+                    case ActivationFunc.Softmax:
+                        float temp = 0;
+                        for (int i = 0; i < X.Length; i++)
+                        {
+                            result[i] = MathF.Exp(X[i]);
+                            temp += result[i];
+                        }
+                        temp = 1 / temp;
+                        for (int i = 0; i < X.Length; i++)
+                            result[i] *= temp;
+                        break;
+                    case ActivationFunc.Linear:
+                    default:
+                        return X;
+                }
+
+                return result;
+            }
+        }
+
+        public class Layer
+        {
+            public readonly bool useBias;
+
+            public int dim { get; protected set; } = -1;
+            public INeuralNetwork network { get; protected set; }
+
+            protected int layerIndex = -1;
+            protected float[] biases;
+
+            public Layer(int dim, bool useBias = true)
+            {
+                this.dim = dim;
+                this.useBias = useBias;
+
+                if (dim != -1)
+                    biases = new float[dim];
+            }
+
+            public Layer(float[] biases)
+            {
+                this.dim = biases.Length;
+                this.biases = biases;
+            }
+
+            public virtual void Build(INeuralNetwork network)
+            {
+                this.network = network;
+                for (int i = 0; i < network.Layers.Length; i++)
+                    if (network.Layers[i] == this)
+                    {
+                        layerIndex = i;
+                        return;
+                    }
+
+                throw new Exception("nah layer findings");
+            }
+
+            public virtual float GetBias(int index) => useBias ? biases[index] : 0;
+
+            public virtual void SetBias(int index, float value) => biases[index] = useBias ? value : 0;
+
+            /// <returns>Returns descended errors</returns>
+            public virtual void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
+            {
+                if (!useBias)
+                    return;
+
+                for (int sample = 0; sample < errors.Length; sample++)
+                {
+                    float[] df = FunctionDifferential(log.layerInputs[layerIndex][sample], Enumerable.Range(0, dim).Select(GetBias).GetEnumerator());
+
+                    // bias update
+                    for (int i = 0; i < dim; i++)
+                    {
+                        errors[sample][i] *= df[i];
+                        SetBias(i, optimizer.BiasUpdate(layerIndex, i, errors[sample][i]));
+                    }
+                }
+            }
+
+            public virtual float[][] Forward(float[][] inputs)
+            {
+                float[][] result = new float[inputs.Length][];
+
+                for (int i = 0; i < inputs.Length; i++)
+                    result[i] = new float[dim];
+
+                for (int i = 0; i < inputs.Length; i++)
+                    for (int j = 0; j < dim; j++)
+                        result[i][j] = ForwardComp(inputs[i][j] + GetBias(j));
+
+                return result;
+            }
+
+            public virtual float[] Forward(float[] inputs)
+            {
+                float[] result = new float[dim];
+
+                for (int i = 0; i < dim; i++)
+                    result[i] = ForwardComp(inputs[i] + GetBias(i));
+
+                return result;
+            }
+
+            public virtual float ForwardComp(float x) => x;
+
+            /// <summary>
+            /// Will be called indirectly through <b>FunctionDifferential(float[] X)</b> if wasn't overridden
+            /// </summary>
+            /// <returns> Return <b>df(bias, x) / dx</b></returns>
+            public virtual float FunctionDifferential(float x, float offset = 0) => 1 + offset;
+
+            /// <summary>
+            /// Will be called directly in the <b>GradientDescent</b> method
+            /// </summary>
+            /// <returns> Return <b>df(bias, x) / dx</b> for each x in X </returns>
+            public virtual float[] FunctionDifferential(float[] X)
+            {
+                float[] result = new float[X.Length];
+                for (int i = 0; i < X.Length; i++)
+                    result[i] = X[i];
+
+                return result;
+            }
+
+            /// <summary>
+            /// Will be called directly in the <b>GradientDescent</b> method
+            /// </summary>
+            /// <returns> Return <b>df(bias, x) / dx</b> for each x in X </returns>
+            public virtual float[] FunctionDifferential(float[] X, IEnumerator<float> offsets)
+            {
+                float[] result = new float[X.Length];
+                for (int i = 0; i < X.Length; i++, offsets.MoveNext())
+                    result[i] = X[i] + offsets.Current;
+
+                return result;
+            }
+
+            public virtual WeightMatrix GenerateWeightMatrix()
+            {
+                return new DenseWeightMatrix();
+            }
+
+            public static implicit operator Layer(int dim) => new Layer(dim);
+        }
+
+        #endregion
+
+        #region Weight matrix
+
+        public abstract class WeightMatrix
+        {
+            public int inDim { get; protected set; }
+            public int outDim { get; protected set; }
+            public INeuralNetwork network { get; protected set; }
+
+            protected int weightsIndex;
+
+            public virtual void Build(INeuralNetwork network)
+            {
+                this.network = network;
+                for (int i = 0; i < network.Weights.Length; i++)
+                    if (network.Weights[i] == this)
+                    {
+                        weightsIndex = i;
+                        return;
+                    }
+
+                throw new Exception("nah weights findings");
+            }
+
+            public abstract void GradientDescent(ref float[][] errors, ForwardResult result, Optimizer optimizer);
+
+            public abstract float[] Forward(float[] inputs);
+
+            public abstract float[][] Forward(float[][] inputs);
+
+            public abstract float ForwardComp(float[] inputs, int outputIndex);
+
+            /// <summary>
+            /// 
+            /// </summary>
+            /// <param name="value"><inIndex, outIndex, weightValue, returnValue></param>
+            public abstract void AssignForEach(Func<int, int, float, float> value);
+
+            public abstract bool TrySetWeight(int inIndex, int outIndex, float value);
+
+            public abstract bool TryGetWeight(int inIndex, int outIndex, out float weight);
+
+            public abstract float GetWeight(int inIndex, int outIndex);
+        }
+
+        public class ForwardWeightMatrix : WeightMatrix
+        {
+            public readonly bool useWeights;
+
+            public float[] matrix;
+
+            public int dim => inDim;
+
+            public ForwardWeightMatrix(bool useWeights = true)
+            {
+                this.useWeights = useWeights;
+            }
+
+            public override void Build(INeuralNetwork network)
+            {
+                base.Build(network);
+
+                if (network.Layers[weightsIndex] is ForwardLayer && ((ForwardLayer)network.Layers[weightsIndex]).port != ForwardLayer.ForwardPort.In)
+                    inDim = outDim = network.Layers[weightsIndex].dim;
+                else if (network.Layers[weightsIndex + 1] is ForwardLayer && ((ForwardLayer)network.Layers[weightsIndex + 1]).port != ForwardLayer.ForwardPort.Out)
+                    inDim = outDim = network.Layers[weightsIndex + 1].dim;
+                else
+                    throw new Exception("Nah forward weight dim");
+
+                matrix = new float[dim];
+            }
+
+            public override void AssignForEach(Func<int, int, float, float> value)
+            {
+                for (int i = 0; i < dim; i++)
+                {
+                    if (useWeights)
+                        matrix[i] = value(i, i, matrix[i]);
+                    else
+                        value(i, i, 1);
+                }
+            }
+
+            public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
+            {
+                if (!useWeights) return;
+
+                for (int i = 0; i < matrix.Length; i++)
+                {
+                    float weightErrorSum = 0;
+
+                    for (int sample = 0; sample < errors.Length; sample++)
+                    {
+                        weightErrorSum += errors[sample][i] * network.Layers[weightsIndex].ForwardComp(log.layerInputs[weightsIndex][sample][i] + network.Layers[weightsIndex].GetBias(i));
+                        errors[sample][i] *= matrix[i] * network.Layers[weightsIndex].FunctionDifferential(log.layerInputs[weightsIndex][sample][i] + network.Layers[weightsIndex].GetBias(i));
+                    }
+
+                    matrix[i] = optimizer.WeightUpdate(weightsIndex, i, i, weightErrorSum);
+                }
+            }
+
+            public override float[] Forward(float[] inputs)
+            {
+                float[] result = new float[dim];
+
+                for (int i = 0; i < dim; i++)
+                    result[i] = ForwardComp(inputs, i);
+
+                return result;
+            }
+
+            public override float[][] Forward(float[][] inputs)
+            {
+                float[][] result = new float[inputs.Length][];
+
+                for (int i = 0; i < inputs.Length; i++)
+                    result[i] = new float[dim];
+
+                for (int i = 0; i < inputs.Length; i++)
+                    for (int j = 0; j < dim; j++)
+                    {
+                        if (useWeights)
+                            result[i][j] = inputs[i][j] * matrix[j];
+                        else
+                            result[i][j] = inputs[i][j];
+                    }
+
+                return result;
+            }
+
+            public override float ForwardComp(float[] inputs, int outputIndex)
+            {
+                if (useWeights)
+                    return inputs[outputIndex] * matrix[outputIndex];
+                else
+                    return inputs[outputIndex];
+            }
+
+            public override float GetWeight(int inIndex, int outIndex)
+            {
+                if (useWeights)
+                {
+                    if (inIndex == outIndex && inIndex < dim)
+                        return matrix[inIndex];
+                }
+                else if (inIndex == outIndex)
+                    return 1;
+                else
+                    return 0;
+
+                throw new Exception("No weight here bro");
+            }
+
+            public override bool TryGetWeight(int inIndex, int outIndex, out float weight)
+            {
+                if (useWeights)
+                    weight = matrix[inIndex];
+                else if (inIndex == outIndex)
+                    weight = 1;
+                else
+                    weight = 0;
+
+                return inIndex == outIndex && inIndex < dim;
+            }
+
+            public override bool TrySetWeight(int inIndex, int outIndex, float value)
+            {
+                if (useWeights && inIndex == outIndex && inIndex < dim)
+                {
+                    matrix[inIndex] = value;
+                    return true;
+                }
+
+                return false;
+            }
+        }
+
+        public class DenseWeightMatrix : WeightMatrix
+        {
+            public float[,] matrix;
+
+            public DenseWeightMatrix() { }
+
+            public override void Build(INeuralNetwork network)
+            {
+                base.Build(network);
+
+                inDim = network.Layers[weightsIndex].dim;
+                outDim = network.Layers[weightsIndex + 1].dim;
+
+                matrix = new float[outDim, inDim];
+            }
+
+            public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
+            {
+                Layer prevLayer = network.Layers[weightsIndex];
+
+                float[][] weightErrors = new float[errors.Length][];
+                for (int i = 0; i < errors.Length; i++)
+                    weightErrors[i] = new float[inDim];
+
+                for (int i = 0; i < outDim; i++)
+                    for (int j = 0; j < inDim; j++)
+                    {
+                        float weightErrorSum = 0;
+
+                        for (int sample = 0; sample < errors.Length; sample++)
+                        {
+                            weightErrorSum += errors[sample][i] * prevLayer.ForwardComp(log.layerInputs[weightsIndex][sample][j] + prevLayer.GetBias(j));
+                            weightErrors[sample][j] += errors[sample][i] * matrix[i, j] * prevLayer.FunctionDifferential(log.layerInputs[weightsIndex][sample][j] + prevLayer.GetBias(j));
+                        }
+
+                        matrix[i, j] = optimizer.WeightUpdate(weightsIndex, j, i, weightErrorSum);
+                    }
+
+                errors = weightErrors;
+            }
+
+            public override bool TryGetWeight(int inIndex, int outIndex, out float weight)
+            {
+                weight = matrix[outIndex, inIndex];
+                return true;
+            }
+
+            public override float GetWeight(int inIndex, int outIndex) => matrix[outIndex, inIndex];
+
+            public override void AssignForEach(Func<int, int, float, float> value)
+            {
+                for (int i = 0; i < outDim; i++)
+                    for (int j = 0; j < inDim; j++)
+                        matrix[i, j] = value(j, i, matrix[i, j]);
+            }
+
+            public override float[] Forward(float[] inputs)
+            {
+                float[] result = new float[outDim];
+
+                for (int i = 0; i < outDim; i++)
+                    for (int j = 0; j < inDim; j++)
+                        result[i] += inputs[j] * matrix[i, j];
+
+                return result;
+            }
+
+            public override float[][] Forward(float[][] inputs)
+            {
+                float[][] result = new float[inputs.Length][];
+
+                for (int i = 0; i < inputs.Length; i++)
+                    result[i] = new float[outDim];
+
+                for (int i = 0; i < inputs.Length; i++)
+                    for (int j = 0; j < outDim; j++)
+                        for (int k = 0; k < inDim; k++)
+                            result[i][j] += inputs[i][k] * matrix[j, k];
+
+                return result;
+            }
+
+            public override float ForwardComp(float[] inputs, int outputIndex)
+            {
+                float output = 0;
+
+                for (int i = 0; i < inputs.LongLength; i++)
+                    output += matrix[outputIndex, i] * inputs[i];
+
+                return output;
+            }
+
+            public override bool TrySetWeight(int inIndex, int outIndex, float value)
+            {
+                matrix[outIndex, inIndex] = value;
+                return true;
+            }
+        }
+
+        #endregion
+
+        namespace RL
+        {
             public interface IEnvironment
             {
-                INumMutator numMutator { get; }
-                IAgent[] agents { get; }
+                IEnumerable<IAgent> Agents { get; }
 
-                void Initialize();
+                void Init();
 
-                void NextGen();
-
-                void Evaluate(IAgent agent);
-
-                IAgent SpawnAgent();
-
-                void ResetAgent(IAgent agent);
-
-                void KillAgentAt(int index);
+                /// <summary>
+                /// Reset all including environment and agents
+                /// </summary>
+                void Reset();
             }
-
-            //public interface INEAT_Environment : IEnvironment
-            //{
-            //    float nodeMutationRate { get; }
-            //    float crossOnlyRate { get; }
-
-            //    int initialPopulation { get; }
-            //    int eliteNum { get; }
-
-            //    int[][] species { get; }
-            //    float[][] highscores { get; }
-            //    INeuralNetwork[][] eliteGroup { get; }
-
-            //    int genCount { get; }
-            //    int instanceLeft { get; }
-
-            //    public void NextGen()
-            //    {
-            //        for (int i = 0; i < initialPopulation; i++)
-            //            RegisterScoreboard(agents[i]);
-
-            //        //ResetAgent(demoAgent);
-            //        //if (highscores[0] > 0)
-            //        //    demoAgent.policy = eliteGroup[0].DeepClone();
-
-            //        for(int spe = 0; spe < species.Length; spe++)
-            //        {
-            //            for(int i = 0; i < species[spe].Length; i++)
-            //            {
-
-            //            }
-            //        }
-
-            //        for (int i = 0; i < initialPopulation; i++)
-            //        {
-            //            ResetAgent(agents[i]);
-
-            //            if (highscores[0] > 0)
-            //                agents[i].policy = eliteGroup[Randomizer.singleton.RandomRange(0, eliteNum - 1)].DeepClone();
-            //            agents[i].policy.Mutate(nodeMutationRate, numMutator);
-            //        }
-
-            //        for (int i = mutateGroupCount; i < mutateGroupCount + crossGroupCount; i++)
-            //        {
-            //            ResetAgent(unityAgents[i]);
-
-            //            if (highscores[0] > 0)
-            //            {
-            //                int eliteA = Randomizer.singleton.RandomRange(0, eliteNum - 1), eliteB = Randomizer.singleton.RandomRange(0, eliteNum - 1);
-
-            //                while (eliteA == eliteB)
-            //                    eliteB = Randomizer.singleton.RandomRange(0, eliteNum - 1);
-
-            //                unityAgents[i].policy = eliteGroup[eliteA].DeepClone();
-            //                unityAgents[i].policy.Crossover(eliteGroup[eliteB]);
-            //            }
-            //            else
-            //                unityAgents[i].policy.Mutate(mutationRate, numMutator);
-            //        }
-
-            //        instanceLeft = mutateGroupCount + crossGroupCount;
-            //        genCount++;
-            //    }
-
-            //    public virtual void RegisterScoreboard(IAgent agent)
-            //    {
-            //        for (int i = highscores.Length - 1; i >= 0; i--)
-            //        {
-            //            if (agent.score < highscores[i])
-            //            {
-            //                if (i != highscores.Length - 1)
-            //                {
-            //                    highscores[i + 1] = agent.score;
-            //                    eliteGroup[i + 1] = agent.policy.DeepClone();
-
-            //                    //if (i + 1 < highscoreUIs.Length)
-            //                    //    highscoreUIs[i + 1].text = string.Format("{0}. {1}", i + 2, highscores[i + 1]);
-            //                }
-            //                break;
-            //            }
-            //            else if (i == 0)
-            //            {
-            //                highscores[i] = agent.score;
-            //                eliteGroup[i] = agent.policy.DeepClone();
-
-            //                //if (i < highscoreUIs.Length)
-            //                //    highscoreUIs[i].text = string.Format("{0}. {1}", i + 1, highscores[i]);
-            //            }
-            //        }
-            //    }
-
-            //    public virtual int CalculateSpecieIndex(int curSpeice, NetworkMoprhInfo info)
-            //    {
-            //        return curSpecie + Mathf.RoundToInt(CalculateSpecieIndex(info) / 2);
-            //    }
-
-            //    public virtual float CalculateCompatibilityDifference(NetworkMoprhInfo info)
-            //    {
-            //        return info.conCountDif + info.nodeCountDif;
-            //    }
-
-            //    public struct NetworkMoprhInfo
-            //    {
-            //        public int nodeCountDif, conCountDif;
-
-            //        public NetworkCrossInfo(int nodeCountDif, int conCountDif)
-            //        {
-            //            this.nodeCountDif = nodeCountDif;
-            //            this.conCountDif = conCountDif;
-            //        }
-            //    }
-            //}
 
             public interface IAgent
             {
-                public event Action<IAgent> onKilled, onActionMade;
-
-                float score { get; set; }
-
-                INeuralNetwork policy { get; set; }
-
-                void Kill();
-            }
-
-            #region Neural Network
-
-            public enum ActivationFunc : int
-            {
-                Linear = 0,
-                Inverse = 1,
-                Tanh = 2,
-                Sigmoid = 3,
-                ReLU = 4,
-                Squared = 5,
-                Absolute = 6,
-                UnsignedStep = 7
-            }
-
-            public class NEAT_NN : INeuralNetwork
-            {
-                public readonly InnovationCounter innoCounter;
-
-                public Genotype genotype { get; private set; }
-
-                public NEAT_TopologyMutationRateInfo topologyMutationRateInfo;
-
-                public NEAT_NN(Genotype genotype, NEAT_TopologyMutationRateInfo topologyMutationRateInfo) : base()
-                {
-                    this.genotype = genotype;
-                    this.topologyMutationRateInfo = topologyMutationRateInfo;
-                    this.innoCounter = new InnovationCounter();
-                }
-
-                public NEAT_NN(NEAT_NN network)
-                {
-                    genotype = network.genotype.DeepClone();
-                    innoCounter = network.innoCounter.DeepClone();
-                    topologyMutationRateInfo = network.topologyMutationRateInfo;
-                }
-
-                public NEAT_NN(NEAT_NN_Data data, bool deepClone = true)
-                {
-                    if (deepClone)
-                        genotype = data.genotype.DeepClone();
-                    else
-                        genotype = data.genotype;
-
-                    innoCounter = new InnovationCounter(data.curInnoCount);
-                    topologyMutationRateInfo = data.topologyMutationRateInfo;
-                }
-
-                public NEAT_NN() { }
-
-                public void Crossover(INeuralNetwork network)
-                {
-                    if (!(network is NEAT_NN))
-                        return;
-                    NEAT_NN neatNetwork = (NEAT_NN)network;
-
-                    if (neatNetwork.genotype.inputCount != genotype.inputCount || neatNetwork.genotype.outputCount != genotype.outputCount)
-                        return;
-
-                    innoCounter.Increase();
-
-                    InnovationList<ConnectionGene> mateCons = neatNetwork.genotype.connections;
-
-                    foreach (int innovationNum in mateCons.Keys)
-                        if (Randomizer.singleton.RandomBool())
-                        {
-                            genotype.connections[innovationNum] = new List<ConnectionGene>();
-
-                            for (int i = 0; i < mateCons[innovationNum].Count; i++)
-                            {
-                                ConnectionGene targetCon = mateCons[innovationNum][i];
-
-                                if (!CreateNodeAndMismatchOrigin(targetCon.outputNodeID, neatNetwork) ||
-                                    !CreateNodeAndMismatchOrigin(targetCon.inputNodeID, neatNetwork))
-                                    continue;
-
-                                if (!genotype.ExistDescendedNode(targetCon.inputNodeID, targetCon.outputNodeID))
-                                    genotype.connections.Add(innovationNum, targetCon.DeepClone());
-                            }
-                        }
-                }
+                IEnvironment Env { get; }
+                IPolicy Policy { get; }
+                IPolicyOptimization PolicyOpt { get; }
 
                 /// <summary>
-                /// 
+                /// Reset states, not policy
                 /// </summary>
-                /// <param name="nodeID"></param>
-                /// <param name="sourceNet"></param>
-                /// <returns>Whether or not the operation creates circular connection chain</returns>
-                bool CreateNodeAndMismatchOrigin(int nodeID, NEAT_NN sourceNet)
+                void ResetStates();
+
+                /// <returns><b>Observation</b> as float[] and <b>reward</b> as float</returns>
+                (float[], float) TakeAction(int action);
+            }
+
+            public interface IPolicy
+            {
+                float[] GetActionProbs(float[] obs);
+
+                void Backward(float[] loss);
+            }
+
+            public interface IPolicyOptimization
+            {
+                INeuralNetwork Param { get; }
+
+                int GetAction(float[] actProbs);
+
+                virtual float[][] ComputeLoss(float[][] obs, int[] actions, float[] mass, bool logits = false)
                 {
-                    // error-prone: sourceNet passing 
-                    NodeGene sourceNode = sourceNet.genotype.FindNode(nodeID);
-                    NodeGene fixNode = genotype.FindNode(nodeID);
-                    ConnectionGene targetOutCon = sourceNode.FindOutConnection(sourceNode.origin.outNodeID);
-                    ConnectionGene targetInCon = sourceNode.FindOutConnection(sourceNode.origin.inNodeID);
-                    ConnectionGene outCon, inCon;
+                    float[][] loss = new float[obs.Length][];
+                    for (int i = 0; i < loss.Length; i++)
+                        loss[i] = ComputeLoss(obs[i], actions[i], mass[i], logits);
 
-                    if (fixNode == null)
-                    {
-                        genotype.nodes.Add(sourceNode.innovationNum, sourceNode.DeepClone());
-
-                        if (targetOutCon != null)
-                        {
-                            if (!CreateNodeAndMismatchOrigin(sourceNode.origin.outNodeID, sourceNet))
-                                return false;
-
-                            if (genotype.ExistDescendedNode(sourceNode.nodeID, sourceNode.origin.outNodeID))
-                                return false;
-
-                            outCon = new ConnectionGene(
-                                sourceNode.nodeID,
-                                sourceNode.origin.outNodeID,
-                                targetOutCon.weight);
-                            genotype.connections.Add(targetOutCon.innovationNum, outCon);
-                        }
-
-                        if (targetInCon != null)
-                        {
-                            if (!CreateNodeAndMismatchOrigin(sourceNode.origin.inNodeID, sourceNet))
-                                return false;
-
-                            if (genotype.ExistDescendedNode(sourceNode.origin.inNodeID, sourceNode.nodeID))
-                                return false;
-
-                            inCon = new ConnectionGene(
-                                sourceNode.origin.inNodeID,
-                                sourceNode.nodeID,
-                                targetInCon.weight);
-                            genotype.connections.Add(targetInCon.innovationNum, inCon);
-                        }
-
-                        return true;
-                    }
-                    else if (fixNode.type == NodeType.Input)
-                        return true;
-
-                    if (targetInCon != null)
-                    {
-                        inCon = fixNode.FindInConnection(targetInCon.inputNodeID);
-
-                        if (inCon == null)
-                        {
-                            if (!CreateNodeAndMismatchOrigin(sourceNode.origin.inNodeID, sourceNet))
-                                return false;
-
-                            if (genotype.ExistDescendedNode(sourceNode.origin.inNodeID, nodeID))
-                                return false;
-
-                            inCon = new ConnectionGene(
-                                sourceNode.origin.inNodeID,
-                                nodeID,
-                                targetInCon.weight);
-                            genotype.connections.Add(targetInCon.innovationNum, inCon);
-                        }
-
-                        inCon.weight = targetInCon.weight;
-                    }
-
-                    if (targetOutCon != null)
-                    {
-                        outCon = fixNode.FindOutConnection(targetOutCon.outputNodeID);
-
-                        if (outCon == null)
-                        {
-                            if(!CreateNodeAndMismatchOrigin(sourceNode.origin.outNodeID, sourceNet))
-                                return false;
-
-                            if (genotype.ExistDescendedNode(nodeID, sourceNode.origin.outNodeID))
-                                return false;
-
-                            outCon = new ConnectionGene(
-                                nodeID,
-                                sourceNode.origin.outNodeID,
-                                targetOutCon.weight);
-                            genotype.connections.Add(targetOutCon.innovationNum, outCon);
-                        }
-
-                        outCon.weight = targetOutCon.weight;
-                    }
-
-                    fixNode.bias = sourceNode.bias;
-                    return true;
+                    return loss;
                 }
 
-                public void Mutate(float mutationRate, INumMutator mutator = null)
-                {
-                    innoCounter.Increase();
+                float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false);
+            }
 
-                    MutateBiasesWeights(mutationRate, mutator);
-                    MutateTopology(topologyMutationRateInfo);
+            public class PolicyGradient : IPolicyOptimization
+            {
+                public INeuralNetwork Param { get; private set; }
+
+                public PolicyGradient(INeuralNetwork param)
+                {
+                    this.Param = param;
                 }
 
-                void MutateTopology(NEAT_TopologyMutationRateInfo rateInfo)
+                public virtual int GetAction(float[] actProbs) => MathBT.DrawProbs(actProbs);
+
+                public virtual float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false)
                 {
-                    Mutate_RemoveCon(rateInfo.removeCon);
-                    Mutate_AddNodeToConnection(rateInfo.addNodeToCon);
-                    Mutate_AddCon(rateInfo.addCon);
-                }
+                    float[] outputs;
+                    if (logits)
+                        outputs = Param.Forward(obs).outputs[0];
+                    else
+                        outputs = ActivationLayer.ForwardActivation(ActivationFunc.Softmax, Param.Forward(obs).outputs[0]);
 
-                void Mutate_AddNodeToConnection(float rate)
-                {
-                    rate -= Randomizer.singleton.RandomFloat();
-
-                    while (rate > 0)
-                    {
-                        ConnectionInnoBatch selected = genotype.PickRandomConnection();
-                        NodeGene node = RandomNode(new NodeOrigin(selected.connection.inputNodeID, selected.connection.outputNodeID));
-
-                        genotype.connections.RemoveAt(selected.innovationNum, selected.innerListIndex);
-                        genotype.nodes.Add(innoCounter.innovationNum, node);
-
-                        if (Randomizer.singleton.RandomBool())
-                        {
-                            ConnectionGene inCon = new ConnectionGene(selected.connection.inputNodeID, node.nodeID, selected.connection.weight);
-                            ConnectionGene outCon = new ConnectionGene(node.nodeID, selected.connection.outputNodeID, GenerateRandWeightBias());
-
-                            genotype.connections.Add(innoCounter.innovationNum, inCon);
-                            genotype.connections.Add(innoCounter.innovationNum, outCon);
-                        }
-                        else
-                        {
-                            ConnectionGene inCon = new ConnectionGene(selected.connection.inputNodeID, node.nodeID, GenerateRandWeightBias());
-                            ConnectionGene outCon = new ConnectionGene(node.nodeID, selected.connection.outputNodeID, selected.connection.weight);
-
-                            genotype.connections.Add(innoCounter.innovationNum, inCon);
-                            genotype.connections.Add(innoCounter.innovationNum, outCon);
-                        }
-
-                        rate -= Randomizer.singleton.RandomFloat();
-                    }
-                }
-
-                void Mutate_RemoveCon(float rate)
-                {
-                    float rand = Randomizer.singleton.RandomFloat();
-
-                    while (rate >= rand)
-                    {
-                        ConnectionInnoBatch selected;
-                        int sampleCount = 0;
-
-                        do
-                        {
-                            selected = genotype.PickRandomConnection();
-
-                            if (++sampleCount < 15)
-                                return;
-                        } while (
-                            NodeGeneIdentifier.Get(selected.connection.inputNodeID).type != NodeType.Hidden &&
-                            NodeGeneIdentifier.Get(selected.connection.outputNodeID).type != NodeType.Hidden);
-
-                        genotype.connections.RemoveAt(selected.innovationNum, selected.innerListIndex);
-
-                        rand += Randomizer.singleton.RandomFloat();
-                    }
-                }
-
-                void Mutate_AddCon(float rate)
-                {
-                    rate -= Randomizer.singleton.RandomFloat();
-
-                    while (rate > 0)
-                    {
-                        NodeGene nodeA = genotype.PickRandomNode(), nodeB;
-
-                        do
-                        {
-                            if (nodeA.type == NodeType.Output)
-                            {
-                                nodeB = nodeA;
-                                nodeA = genotype.PickRandomNode(true, false);
-                            }
-                            else if (nodeA.type == NodeType.Input)
-                                nodeB = genotype.PickRandomNode(false, true);
-                            else
-                            {
-                                nodeB = genotype.PickRandomNode();
-
-                                if (nodeB.type == NodeType.Input)
-                                {
-                                    NodeGene temp = nodeA;
-                                    nodeA = nodeB;
-                                    nodeB = temp;
-                                }
-                            }
-                        }
-                        while (genotype.ExistDescendedNode(nodeA.nodeID, nodeB.nodeID));
-
-                        genotype.connections.Add(innoCounter.innovationNum, new ConnectionGene(nodeA.nodeID, nodeB.nodeID, GenerateRandWeightBias()));
-
-                        rate -= Randomizer.singleton.RandomFloat();
-                    }
-                }
-
-                void MutateBiasesWeights(float mutationRate, INumMutator mutator = null)
-                {
-                    int biasCount, biasWeightCount = genotype.GetWeightBiasCount(out biasCount);
-                    float overallRate = 1 - BTMath.singleton.Pow(1 - mutationRate, biasWeightCount);
-                    float randPick = Randomizer.singleton.RandomFloat();
-
-                    while (overallRate > randPick)
-                    {
-                        if (Randomizer.singleton.RandomFloat() < biasCount / biasWeightCount)
-                        {
-                            NodeGene selected = genotype.PickRandomNode(false, true);
-
-                            selected.bias =
-                                mutator == null ? GenerateRandWeightBias() : mutator.Mutate(selected.bias);
-
-                            if (selected.type == NodeType.Hidden)
-                                selected.func = (ActivationFunc)Randomizer.singleton.RandomRange(0, GlobalVar.ActivationFuncCount);
-                        }
-                        else
-                        {
-                            ConnectionInnoBatch selected = genotype.PickRandomConnection();
-
-                            selected.connection.weight =
-                                mutator == null ? GenerateRandWeightBias() : mutator.Mutate(selected.connection.weight);
-                        }
-
-                        randPick += Randomizer.singleton.RandomFloat();
-                    }
-                }
-
-                public float[] Predict(params float[] inputs)
-                {
-                    float[] outputs = new float[genotype.outputCount];
-
-                    // iterate output nodes
-                    for (int i = genotype.inputCount; i < genotype.inputCount + genotype.outputCount; i++)
-                    {
-                        outputs[i - genotype.inputCount] = ForwardTo(i, inputs, new NodeListBuffer());
-                    }
+                    for (int i = 0; i < outputs.Length; i++)
+                        outputs[i] = MathF.Log(outputs[action]) * mass;
 
                     return outputs;
                 }
+            }
+        }
+    }
 
-                float ForwardTo(int nodeID, float[] inputs, NodeListBuffer buffer)
+    namespace Data
+    {
+        public static class UData
+        {
+            public static string[] GetCategoriesFromCSV(string path)
+            {
+                string[] cats;
+                using (StreamReader reader = new StreamReader(path))
+                    cats = reader.ReadLine().Split(',');
+
+                return cats;
+            }
+
+            public static Dictionary<string, float>[] RetrieveDistinctIntDataFromCSV(string path, int retrieveAmount, params string[] retrieveCats)
+            {
+                string[] cats = GetCategoriesFromCSV(path);
+                List<string> neglectCats = new List<string>();
+                DistinctIntDataInfo[] encodings;
+                Dictionary<string, AdditionNumericDataInfo> numericInfos;
+
+                DataType[] dataTypes = new DataType[cats.Length];
+
+                for (int i = 0; i < cats.Length; i++)
                 {
-                    NodeGene node = genotype.FindNode(nodeID);
-
-                    // inputs into buffer
-                    if (node.type == NodeType.Input)
-                        return node.Forward(inputs[nodeID]);
-                    else if (buffer.CheckIterated(nodeID))
-                        return buffer[nodeID];
-                    else
-                    {
-                        float output = node.bias;
-
-                        for (int i = 0; i < node.inCons.Count; i++)
-                            output += node.inCons[i].weight * ForwardTo(node.inCons[i].inputNodeID, inputs, buffer);
-                        buffer[nodeID] = node.Forward(output);
-
-                        return buffer[nodeID];
-                    }
-                }
-
-                public string ToJson()
-                {
-                    return JsonUtility.ToJson(new NEAT_NN_Data(this));
-                }
-
-                public T FromJson<T>(string json)
-                {
-                    return (T)JsonUtility.FromJson(json, typeof(T));
-                }
-
-                [Serializable]
-                public class NEAT_NN_Data
-                {
-                    public int curInnoCount;
-                    public Genotype genotype;
-                    public NEAT_TopologyMutationRateInfo topologyMutationRateInfo;
-
-                    public NEAT_NN_Data(NEAT_NN neatNetwork)
-                    {
-                        this.curInnoCount = neatNetwork.innoCounter.innovationNum;
-                        this.genotype = neatNetwork.genotype;
-                        this.topologyMutationRateInfo = neatNetwork.topologyMutationRateInfo;
-                    }
-                }
-
-                public INeuralNetwork DeepClone()
-                {
-                    return new NEAT_NN(this);
-                }
-
-                public NodeGene RandomNode(NodeOrigin origin)
-                {
-                    return new NodeGene(NodeType.Hidden, GenerateRandWeightBias(), origin, (ActivationFunc)Randomizer.singleton.RandomRange(0, GlobalVar.ActivationFuncCount - 1));
-                }
-
-                public NodeGene RandomNode()
-                {
-                    return new NodeGene(NodeType.Hidden, GenerateRandWeightBias(), (ActivationFunc)Randomizer.singleton.RandomRange(0, GlobalVar.ActivationFuncCount - 1));
-                }
-
-                public static float GenerateRandWeightBias() => Randomizer.singleton.RandomFloat() * 2 - 1;
-
-                [Serializable]
-                public struct NEAT_TopologyMutationRateInfo
-                {
-                    public float addCon, removeCon, addNodeToCon;
-
-                    public NEAT_TopologyMutationRateInfo(float addCon, float removeCon, float addNodeToCon)
-                    {
-                        this.addCon = addCon;
-                        this.removeCon = removeCon;
-                        this.addNodeToCon = addNodeToCon;
-                    }
-                }
-
-                public class NodeListBuffer
-                {
-                    Dictionary<int, float> outputs;
-
-                    public NodeListBuffer()
-                    {
-                        outputs = new Dictionary<int, float>();
-                    }
-
-                    /// <summary>
-                    /// Assign value of non-NaN value will also assign correlated <b>isIterated</b> to true, otherwise false
-                    /// </summary>
-                    /// <returns>Saved <b>output</b> of the index if <b>isIterated</b>, otherwise NaN</returns>
-                    public float this[int id]
-                    {
-                        get => outputs[id];
-                        set
+                    bool going = true;
+                    foreach (string cat in retrieveCats)
+                        if (cats[i] == cat)
                         {
-                            if (outputs.ContainsKey(id))
-                                outputs[id] = value;
-                            else
-                                outputs.Add(id, value);
-                        }
-                    }
-
-                    public void SetIterated(int id, bool value)
-                    {
-                        if(!value)
-                            outputs[id] = float.NaN;
-                    }
-
-                    public bool CheckIterated(int id)
-                    {
-                        if (outputs.ContainsKey(id))
-                            return outputs[id] != float.NaN;
-                        else
-                            return false;
-                    }
-                }
-
-                public class InnovationCounter : IDeepClonable<InnovationCounter>
-                {
-                    int _innovationNum = 0;
-                    public int innovationNum => _innovationNum;
-
-                    public InnovationCounter(int start = 0)
-                    {
-                        _innovationNum = start;
-                    }
-
-                    public void Increase() => _innovationNum++;
-
-                    public InnovationCounter DeepClone()
-                    {
-                        InnovationCounter clone = new InnovationCounter();
-                        clone._innovationNum = innovationNum;
-
-                        return clone;
-                    }
-                }
-
-                [Serializable]
-                public class Genotype : IDeepClonable<Genotype>
-                {
-                    [NonSerialized] public readonly int inputCount;
-                    [NonSerialized] public readonly int outputCount;
-
-                    public InnovationList<NodeGene> nodes;
-                    public InnovationList<ConnectionGene> connections;
-
-                    public Genotype(int input, int output, ActivationFunc inputFunc = default, ActivationFunc outputFunc = default, bool generateCons = true)
-                    {
-                        nodes = new InnovationList<NodeGene>();
-                        connections = new InnovationList<ConnectionGene>();
-
-                        connections.onAdd += Connection_OnAdd;
-                        connections.onRemove += Connections_OnRemove;
-
-                        nodes.onRemove += Nodes_OnRemove;
-
-                        inputCount = input;
-                        outputCount = output;
-
-                        for (int i = 0; i < input; i++)
-                            nodes.Add(0, new NodeGene(NodeType.Input, GenerateRandWeightBias() * .8f, new NodeOrigin(i), inputFunc));
-
-                        for (int i = 0; i < output; i++)
-                        {
-                            nodes.Add(0, new NodeGene(NodeType.Output, GenerateRandWeightBias() * .8f, new NodeOrigin(input + i), outputFunc));
-
-                            if (generateCons)
-                                for (int j = 0; j < input; j++)
-                                    connections.Add(0, new ConnectionGene(j, input + i, GenerateRandWeightBias() * .8f));
-                        }
-                    }
-
-                    private Genotype(Genotype source)
-                    {
-                        nodes = new InnovationList<NodeGene>();
-                        connections = new InnovationList<ConnectionGene>();
-
-                        connections.onAdd += Connection_OnAdd;
-                        connections.onRemove += Connections_OnRemove;
-
-                        nodes.onRemove += Nodes_OnRemove;
-
-                        inputCount = source.inputCount;
-                        outputCount = source.outputCount;
-
-                        foreach (int innoNum in source.nodes.Keys)
-                        {
-                            nodes.Add(innoNum, new List<NodeGene>());
-
-                            for (int i = 0, count = source.nodes[innoNum].Count; i < count; i++)
-                                nodes.Add(innoNum, source.nodes[innoNum][i].DeepClone());
+                            dataTypes[i] = DataType.DistinctInt;
+                            going = false;
+                            break;
                         }
 
-                        foreach (int innoNum in source.connections.Keys)
-                        {
-                            connections.Add(innoNum, new List<ConnectionGene>());
+                    if (!going)
+                        continue;
 
-                            for (int i = 0, count = source.connections[innoNum].Count; i < count; i++)
-                                connections.Add(innoNum, source.connections[innoNum][i].DeepClone());
-                        }
-                    }
-
-                    public int GetWeightBiasCount()
-                    {
-                        int count = 0;
-
-                        foreach (int innovation in nodes.Keys)
-                            count += nodes[innovation].Count;
-
-                        foreach (int innovation in connections.Keys)
-                            count += connections[innovation].Count;
-
-                        return count;
-                    }
-
-                    public int GetWeightBiasCount(out int biasCount)
-                    {
-                        int count = 0;
-
-                        foreach (int innovation in nodes.Keys)
-                            count += nodes[innovation].Count;
-
-                        biasCount = count;
-
-                        foreach (int innovation in connections.Keys)
-                            count += connections[innovation].Count;
-
-                        return count;
-                    }
-
-                    public int GetBiasCount()
-                    {
-                        int count = 0;
-
-                        foreach (int innovation in nodes.Keys)
-                            count += nodes[innovation].Count;
-
-                        return count;
-                    }
-
-                    public ConnectionInnoBatch PickRandomConnection()
-                    {
-                        int selectedInno, selectedInnerIndex;
-
-                        return new ConnectionInnoBatch(connections.PickRandom(out selectedInno, out selectedInnerIndex), selectedInno, selectedInnerIndex);
-                    }
-
-                    public NodeGene PickRandomNode()
-                    {
-                        return nodes.PickRandom();
-                    }
-
-                    public NodeGene PickRandomNode(bool includeInputs, bool includeOutputs)
-                    {
-                        int biasCount = GetBiasCount();
-
-                        if (includeInputs)
-                        {
-                            if (includeOutputs)
-                                return PickRandomNode();
-                            else if (Randomizer.singleton.RandomFloat() > inputCount / biasCount)
-                                return nodes[0][Randomizer.singleton.RandomRange(0, inputCount - 1)];
-                            else
-                                return nodes.PickRandom(1);
-                        }
-                        else if (includeOutputs)
-                        {
-                            if (Randomizer.singleton.RandomFloat() > outputCount / biasCount)
-                                return nodes[0][Randomizer.singleton.RandomRange(inputCount, outputCount - 1)];
-                            else
-                                return nodes.PickRandom(1);
-                        }
-
-                        return nodes.PickRandom(1);
-                    }
-
-                    public bool ExistDescendedNodeBranch(int fromNodeID, int nodeFindID, List<int> iteratedList = null)
-                    {
-                        if (iteratedList == null)
-                            iteratedList = new List<int>();
-
-                        NodeGene node = FindNode(fromNodeID);
-
-                        for (int i = 0; i < node.inCons.Count; i++)
-                            if (ExistDescendedNode(node.inCons[i].inputNodeID, nodeFindID, iteratedList))
-                                return true;
-
-                        return false;
-                    }
-
-                    public bool ExistDescendedNode(int fromNodeID, int nodeFindID, List<int> iteratedList = null)
-                    {
-                        if (fromNodeID == nodeFindID)
-                            return true;
-
-                        if (iteratedList == null)
-                            iteratedList = new List<int>();
-
-                        NodeGene node = FindNode(fromNodeID);
-
-                        if (node.inCons.Count == 0)
-                            return false;
-
-                        for (int i = 0, count = iteratedList.Count; i < count; i++)
-                            if (fromNodeID == iteratedList[i])
-                                return false;
-
-                        for (int i = 0, count = node.inCons.Count; i < count; i++)
-                            if (ExistDescendedNode(node.inCons[i].inputNodeID, nodeFindID, iteratedList))
-                                return true;
-
-                        iteratedList.Add(fromNodeID);
-
-                        return false;
-                    }
-
-                    public struct CircularIteratedInNodeInfo
-                    {
-                        int nodeID;
-                        bool existInNode;
-
-                        public CircularIteratedInNodeInfo(int nodeID, bool existInNode)
-                        {
-                            this.nodeID = nodeID;
-                            this.existInNode = existInNode;
-                        }
-                    }
-
-                    public Genotype DeepClone()
-                    {
-                        return new Genotype(this);
-                    }
-
-                    public NodeGene FindNode(int nodeID)
-                    {
-                        if (NodeGeneIdentifier.Get(nodeID) == null)
-                            return null;
-
-                        int innovationNum = NodeGeneIdentifier.Get(nodeID).innovationNum;
-
-                        if (!nodes.ContainsKey(innovationNum))
-                            return null;
-
-                        for (int i = 0, count = nodes[innovationNum].Count; i < count; i++)
-                            if (nodes[innovationNum][i].nodeID == nodeID)
-                                return nodes[innovationNum][i];
-
-                        return null;
-                    }
-
-                    void Connection_OnAdd(int innovation, ConnectionGene gene)
-                    {
-                        NodeGene inNode = FindNode(gene.inputNodeID), outNode = FindNode(gene.outputNodeID);
-
-                        if (inNode == null || outNode == null) return;
-
-                        inNode.outCons.Add(gene);
-                        outNode.inCons.Add(gene);
-                    }
-
-                    // ?: remove tail and head cons as well?
-                    private void Connections_OnRemove(int innovation, ConnectionGene gene)
-                    {
-                        if (connections[innovation].Count == 0)
-                            connections.Remove(innovation);
-
-                        FindNode(gene.inputNodeID).outCons.Remove(gene);
-                        FindNode(gene.outputNodeID).inCons.Remove(gene);
-                    }
-
-                    private void Nodes_OnRemove(int innovation, NodeGene gene)
-                    {
-                        if (nodes[innovation].Count == 0)
-                            nodes.Remove(innovation);
-                    }
+                    dataTypes[i] = DataType.Neglect;
                 }
 
-                public enum NodeType
+                for (int i = 0; i < dataTypes.Length; i++)
+                    if (dataTypes[i] == DataType.Neglect)
+                        neglectCats.Add(cats[i]);
+
+                UDataInfo info = new UDataInfo(neglectCats.ToArray(), dataTypes);
+
+                return RetrieveUDataFromCSV(path, info, out cats, out encodings, out numericInfos, retrieveAmount);
+            }
+
+            public static Dictionary<string, float>[] RetrieveNumberDataFromCSV(string path, int retrieveAmount, out Dictionary<string, AdditionNumericDataInfo> numericInfos, params string[] retrieveCats)
+            {
+                string[] cats = GetCategoriesFromCSV(path);
+                List<string> neglectCats = new List<string>();
+                DistinctIntDataInfo[] encodings;
+
+                DataType[] dataTypes = new DataType[cats.Length];
+
+                for (int i = 0; i < cats.Length; i++)
                 {
-                    Input,
-                    Output,
-                    Hidden
+                    bool going = true;
+                    foreach (string cat in retrieveCats)
+                        if (cats[i] == cat)
+                        {
+                            dataTypes[i] = DataType.Float;
+                            going = false;
+                            break;
+                        }
+
+                    if (!going)
+                        continue;
+
+                    dataTypes[i] = DataType.Neglect;
                 }
 
-                public class NodeGeneIdentifier
+                for (int i = 0; i < dataTypes.Length; i++)
+                    if (dataTypes[i] == DataType.Neglect)
+                        neglectCats.Add(cats[i]);
+
+                UDataInfo info = new UDataInfo(neglectCats.ToArray(), dataTypes);
+
+                return RetrieveUDataFromCSV(path, info, out cats, out encodings, out numericInfos, retrieveAmount);
+            }
+
+            public static Dictionary<string, float>[] RetrieveUDataFromCSV(string path, UDataInfo info, int retrieveAmount = -1)
+            {
+                string[] cats;
+                DistinctIntDataInfo[] encodings;
+                Dictionary<string, AdditionNumericDataInfo> numericInfos;
+                return RetrieveUDataFromCSV(path, info, out cats, out encodings, out numericInfos, retrieveAmount);
+            }
+
+            public static Dictionary<string, float>[] RetrieveUDataFromCSV(string path, UDataInfo info, out Dictionary<string, AdditionNumericDataInfo> numericInfos, int retrieveAmount = -1)
+            {
+                string[] cats;
+                DistinctIntDataInfo[] encodings;
+                return RetrieveUDataFromCSV(path, info, out cats, out encodings, out numericInfos, retrieveAmount);
+            }
+
+            public static Dictionary<string, float>[] RetrieveUDataFromCSV(string path, UDataInfo info, out DistinctIntDataInfo[] distinctEncodings, out Dictionary<string, AdditionNumericDataInfo> numericInfos, int retrieveAmount = -1)
+            {
+                string[] cats;
+                return RetrieveUDataFromCSV(path, info, out cats, out distinctEncodings, out numericInfos, retrieveAmount);
+            }
+
+            public static Dictionary<string, float>[] RetrieveUDataFromCSV(string path, UDataInfo info, out string[] categories, out DistinctIntDataInfo[] distinctEncodings, out Dictionary<string, AdditionNumericDataInfo> numericInfos, int retrieveAmount = -1)
+            {
+                List<Dictionary<string, float>> data = new List<Dictionary<string, float>>();
+                List<float[]> rawData = new List<float[]>();
+                numericInfos = new Dictionary<string, AdditionNumericDataInfo>();
+
+                using (StreamReader reader = new StreamReader(path))
                 {
-                    static List<NodeGeneIdentifier> identifiers = new List<NodeGeneIdentifier>();
-                    static List<int> inputOutputIdIndices = new List<int>();
-                    static int idCounter = 0;
+                    categories = reader.ReadLine().Split(',');
 
-                    public readonly int id;
-                    public readonly int innovationNum;
-                    public readonly NodeType type;
-                    public readonly NodeOrigin origin;
+                    if (info.types.Length != categories.Length)
+                        throw new Exception("type info unmatch");
 
-                    private NodeGeneIdentifier(int innovationNum, NodeType type, NodeOrigin origin)
+                    List<int> iteratingIndexList = new List<int>();
+
+                    for (int i = 0; i < categories.Length; i++)
                     {
-                        this.id = idCounter++;
-                        this.innovationNum = innovationNum;
-                        this.type = type;
-                        this.origin = origin;
+                        int j = 0;
+                        for (; j < info.neglectCats.Length; j++)
+                            if (categories[i] == info.neglectCats[j])
+                                break;
+
+                        if (j == info.neglectCats.Length)
+                            iteratingIndexList.Add(i);
                     }
 
-                    public static int RegisterNodeID(int innovationNum, NodeType type, NodeOrigin origin)
+                    int[] iteratingIndices = iteratingIndexList.ToArray();
+
+                    foreach (int i in iteratingIndices)
                     {
-                        NodeGeneIdentifier nodeID;
+                        if (info.types[i] == DataType.Float)
+                            numericInfos.Add(categories[i], new AdditionNumericDataInfo(float.NaN, float.NaN, 0));
+                    }
 
-                        if (type != NodeType.Hidden)
-                        {
-                            int index = origin.GetInOutNodeIndex();
+                    Dictionary<int, int> givenDistinctDataIndices = new Dictionary<int, int>();
 
-                            if (index != -1 && index < inputOutputIdIndices.Count) 
+                    for (int i = 0; i < info.distinctData.Length; i++)
+                        for (int j = 0; j < categories.Length; j++)
+                            if (info.distinctData[i].category == categories[j])
                             {
-                                if (inputOutputIdIndices[index] != -1)
-                                    return inputOutputIdIndices[index];
+                                givenDistinctDataIndices.Add(j, i);
+                                break;
                             }
-                            else
+
+                    List<int> scoutDistinctDataIndices = new List<int>();
+                    for (int i = 0; i < info.types.Length; i++)
+                        if (info.types[i] == DataType.DistinctInt)
+                            if (!givenDistinctDataIndices.Keys.Contains(i))
+                                scoutDistinctDataIndices.Add(i);
+
+                    List<string>[] scoutDistinctData = new List<string>[scoutDistinctDataIndices.Count];
+
+                    for (int i = 0; i < scoutDistinctData.Length; i++)
+                        scoutDistinctData[i] = new List<string>();
+
+                    int retrieveCount = 0;
+                    while (!reader.EndOfStream && (retrieveCount < retrieveAmount || retrieveAmount == -1))
+                    {
+                        string[] rawDataLine = reader.ReadLine().Split(',');
+                        float[] dataLine = new float[iteratingIndices.Length];
+
+                        int curDistinct = 0;
+
+                        bool empty = false;
+                        foreach (int index in iteratingIndices)
+                            if (string.IsNullOrEmpty(rawDataLine[index]))
                             {
-                                do
+                                empty = true;
+                                break;
+                            }
+                        if (empty) continue;
+
+                        for (int i = 0; i < iteratingIndices.Length; i++)
+                        {
+                            if (string.IsNullOrEmpty(rawDataLine[iteratingIndices[i]]))
+                                continue;
+
+                            bool added = false;
+                            foreach (int index in givenDistinctDataIndices.Keys)
+                                if (iteratingIndices[i] == index)
                                 {
-                                    inputOutputIdIndices.Add(-1);
-                                } while (index >= inputOutputIdIndices.Count);
+                                    for (int j = 0; j < info.distinctData[givenDistinctDataIndices[index]].encodings.Length; j++)
+                                        if (info.distinctData[givenDistinctDataIndices[index]].encodings[j] == rawDataLine[iteratingIndices[i]])
+                                            dataLine[iteratingIndices[i]] = j;
+
+                                    added = true;
+                                }
+
+                            if (added)
+                                continue;
+
+                            switch (info.types[iteratingIndices[i]])
+                            {
+                                case DataType.Float:
+                                    dataLine[i] = float.Parse(rawDataLine[iteratingIndices[i]]);
+
+                                    float min = numericInfos[categories[iteratingIndices[i]]].min;
+                                    float max = numericInfos[categories[iteratingIndices[i]]].max;
+
+                                    if (min > dataLine[i] || float.IsNaN(min)) min = dataLine[i];
+                                    if (max < dataLine[i] || float.IsNaN(max)) max = dataLine[i];
+
+                                    numericInfos[categories[iteratingIndices[i]]] = new AdditionNumericDataInfo(min, max, numericInfos[categories[iteratingIndices[i]]].mean + dataLine[i]);
+
+                                    break;
+                                case DataType.DistinctInt:
+                                    int j = 0;
+                                    for (; j < scoutDistinctData[curDistinct].Count;)
+                                    {
+                                        if (scoutDistinctData[curDistinct][j] == rawDataLine[iteratingIndices[i]])
+                                        {
+                                            dataLine[i] = j;
+                                            break;
+                                        }
+                                        j++;
+                                    }
+
+                                    if (j != scoutDistinctData[curDistinct].Count)
+                                    {
+                                        curDistinct++;
+                                        break;
+                                    }
+
+                                    scoutDistinctData[curDistinct].Add(rawDataLine[iteratingIndices[i]]);
+                                    dataLine[i] = scoutDistinctData[curDistinct].Count - 1;
+                                    curDistinct++;
+                                    break;
                             }
-
-                            nodeID = new NodeGeneIdentifier(innovationNum, type, origin);
-
-                            identifiers.Add(nodeID);
-                            inputOutputIdIndices[index] = nodeID.id;
-
-                            return nodeID.id;
                         }
 
-
-                        for (int i = 0, count = identifiers.Count; i < count; i++)
-                            if (identifiers[i].innovationNum == innovationNum)
-                                if (identifiers[i].origin.Equals(origin))
-                                    return i;
-
-                        nodeID = new NodeGeneIdentifier(innovationNum, type, origin);
-
-                        identifiers.Add(nodeID);
-
-                        return nodeID.id;
+                        rawData.Add(dataLine);
+                        retrieveCount++;
                     }
 
-                    public static NodeGeneIdentifier Get(int id)
+                    DistinctIntDataInfo[] distinctInfos = new DistinctIntDataInfo[scoutDistinctData.Length + info.distinctData.Length];
+
+                    foreach (int i in iteratingIndices)
+                        if (info.types[i] == DataType.Float)
+                            numericInfos[categories[i]] = new AdditionNumericDataInfo(numericInfos[categories[i]].min, numericInfos[categories[i]].max, numericInfos[categories[i]].mean / rawData.Count);
+
+                    for (int i = 0; i < scoutDistinctData.Length; i++)
+                        distinctInfos[i] = new DistinctIntDataInfo(categories[scoutDistinctDataIndices[i]], scoutDistinctData[i].ToArray());
+
+                    for (int i = scoutDistinctData.Length; i < info.distinctData.Length; i++)
+                        distinctInfos[i] = info.distinctData[i - scoutDistinctData.Length];
+
+                    distinctEncodings = distinctInfos;
+
+                    for (int sample = 0; sample < rawData.Count; sample++)
                     {
-                        if (id >= 0 && id < identifiers.Count)
-                            return identifiers[id];
+                        data.Add(new Dictionary<string, float>());
 
-                        return null;
-
+                        for (int i = 0; i < iteratingIndices.Length; i++)
+                            data[sample].Add(categories[iteratingIndices[i]], rawData[sample][i]);
                     }
                 }
 
-                [Serializable]
-                public class NodeGene : IDeepClonable<NodeGene>, InnovationListItem
+                return data.ToArray();
+            }
+        }
+
+        public enum NormalizationMode
+        {
+            MinMaxRange,
+            DivideMean,
+            CutMinDivideMean
+        }
+
+        public struct AdditionNumericDataInfo
+        {
+            public float min, max, mean;
+
+            public AdditionNumericDataInfo(float min, float max, float mean)
+            {
+                this.min = min;
+                this.max = max;
+                this.mean = mean;
+            }
+
+            public float Normalize(NormalizationMode mode, float value)
+            {
+                switch (mode)
                 {
-                    public int nodeID { get; private set; } = -1;
-                    public ActivationFunc func = ActivationFunc.Linear;
-                    public float bias;
-
-                    public NodeType type => NodeGeneIdentifier.Get(nodeID).type;
-                    public NodeOrigin origin => NodeGeneIdentifier.Get(nodeID).origin;
-                    public int innovationNum => NodeGeneIdentifier.Get(nodeID).innovationNum;
-
-                    [NonSerialized] public List<ConnectionGene> inCons;
-                    [NonSerialized] public List<ConnectionGene> outCons;
-
-                    [NonSerialized] NodeGeneDraft draft;
-
-                    public NodeGene(NodeGeneIdentifier nodeID, float bias, ActivationFunc func = ActivationFunc.Linear)
-                    {
-                        this.nodeID = nodeID.id;
-                        this.bias = bias;
-                        this.func = func;
-
-                        inCons = new List<ConnectionGene>();
-                        outCons = new List<ConnectionGene>();
-                    }
-
-                    public NodeGene(NodeType type, float bias, ActivationFunc func = ActivationFunc.Linear)
-                    {
-                        this.draft = new NodeGeneDraft(type, new NodeOrigin());
-                        this.bias = bias;
-                        this.func = func;
-
-                        inCons = new List<ConnectionGene>();
-                        outCons = new List<ConnectionGene>();
-                    }
-
-                    public NodeGene(NodeType type, float bias, NodeOrigin origin, ActivationFunc func = ActivationFunc.Linear)
-                    {
-                        this.draft = new NodeGeneDraft(type, origin);
-                        this.bias = bias;
-                        this.func = func;
-
-                        inCons = new List<ConnectionGene>();
-                        outCons = new List<ConnectionGene>();
-                    }
-
-                    public ConnectionGene FindInConnection(int inNodeID)
-                    {
-                        for (int i = 0, count = outCons.Count; i < count; i++)
-                            if (outCons[i].inputNodeID == inNodeID)
-                                return outCons[i];
-
-                        return null;
-                    }
-
-                    public ConnectionGene FindOutConnection(int outNodeID)
-                    {
-                        for (int i = 0, count = inCons.Count; i < count; i++)
-                            if (inCons[i].outputNodeID == outNodeID)
-                                return inCons[i];
-
-                        return null;
-                    }
-
-                    public NodeGene DeepClone()
-                    {
-                        return new NodeGene(NodeGeneIdentifier.Get(nodeID), bias, func);
-                    }
-
-                    public float Forward(float input)
-                    {
-                        switch (func)
-                        {
-                            case ActivationFunc.Linear:
-                                return input;
-                            case ActivationFunc.Tanh:
-                                return (2 / (1 + BTMath.singleton.Exp(-2 * input))) - 1;
-                            case ActivationFunc.Sigmoid:
-                                return 1 / (1 + BTMath.singleton.Exp(-input));
-                            case ActivationFunc.Squared:
-                                return input * input;
-                            case ActivationFunc.Absolute:
-                                return input < 0 ? -input : input;
-                            case ActivationFunc.ReLU:
-                                return input < 0 ? 0 : input;
-                            case ActivationFunc.Inverse:
-                                return -input;
-                            default:
-                                return input;
-                        }
-                    }
-
-                    public void OnAdd(int innovationNum)
-                    {
-                        if (nodeID == -1)
-                            nodeID = NodeGeneIdentifier.RegisterNodeID(innovationNum, draft.type, draft.origin);
-                    }
-
-                    struct NodeGeneDraft
-                    {
-                        public NodeType type;
-                        public NodeOrigin origin;
-
-                        public NodeGeneDraft(NodeType type, NodeOrigin origin)
-                        {
-                            this.type = type;
-                            this.origin = origin;
-                        }
-                    }
-                }
-
-                [Serializable]
-                public class ConnectionGene : IDeepClonable<ConnectionGene>, InnovationListItem
-                {
-                    public int inputNodeID, outputNodeID;
-                    public float weight;
-                    public int innovationNum { get; private set; }
-
-                    public ConnectionGene(int inputNodeID, int outputNodeID, float weight)
-                    {
-                        this.inputNodeID = inputNodeID;
-                        this.outputNodeID = outputNodeID;
-                        this.weight = weight;
-                    }
-
-                    public ConnectionGene(ConnectionGene connection)
-                    {
-                        inputNodeID = connection.inputNodeID;
-                        outputNodeID = connection.outputNodeID;
-                        weight = connection.weight;
-                        innovationNum = connection.innovationNum;
-                    }
-
-                    public ConnectionGene DeepClone()
-                    {
-                        return new ConnectionGene(this);
-                    }
-
-                    internal void OnAdd(int innovationNum)
-                    {
-                        this.innovationNum = innovationNum;
-                    }
-                }
-
-                public interface InnovationListItem
-                {
-                    virtual void OnAdd(int innovationNum) { }
-
-                    virtual void OnRemove(int innovationNum) { }
-                }
-
-                public struct ConnectionInnoBatch
-                {
-                    public ConnectionGene connection;
-                    public int innovationNum, innerListIndex;
-
-                    public ConnectionInnoBatch(ConnectionGene connection, int innovationNum, int innerListIndex)
-                    {
-                        this.connection = connection;
-                        this.innovationNum = innovationNum;
-                        this.innerListIndex = innerListIndex;
-                    }
-                }
-
-                [Serializable]
-                public struct NodeOrigin : IEquatable<NodeOrigin>
-                {
-                    public int inNodeID, outNodeID;
-
-                    public NodeOrigin(int inNodeID, int outNodeID)
-                    {
-                        this.inNodeID = inNodeID;
-                        this.outNodeID = outNodeID;
-                    }
-
-                    public NodeOrigin(int inoutNodeIndex)
-                    {
-                        this.inNodeID = -inoutNodeIndex - 1;
-                        this.outNodeID = -inoutNodeIndex - 1;
-                    }
-
-                    public int GetInOutNodeIndex() => (inNodeID == outNodeID && inNodeID < 0) ? -inNodeID : -1;
-
-                    public bool Equals(NodeOrigin other) => other.inNodeID == inNodeID && other.outNodeID == outNodeID;
+                    case NormalizationMode.MinMaxRange:
+                        return (value - min) / (max - min);
+                    case NormalizationMode.DivideMean:
+                        return value / mean;
+                    case NormalizationMode.CutMinDivideMean:
+                        return (value - min) / (mean - min);
+                    default:
+                        return value;
                 }
             }
 
-            public class Artificial_NN : INeuralNetwork
+            public float Denormalize(NormalizationMode mode, float value)
             {
-                public readonly int biasWeightCount, inputNum, outputNum;
-
-                public NeuralLayer[] biasLayers { get; protected set; }
-                public float[][,] weights { get; protected set; }
-
-                public Artificial_NN(params NeuralLayer[] layers) : base()
+                switch (mode)
                 {
-                    if (layers.LongLength < 2)
-                        throw new System.Exception("Neuron network init: insufficient layer count");
-
-                    inputNum = layers[0].Length;
-                    outputNum = layers[layers.LongLength - 1].Length;
-
-                    biasLayers = new NeuralLayer[layers.LongLength];
-                    for (int i = 0; i < biasLayers.LongLength; i++)
-                        biasLayers[i] = (NeuralLayer)layers[i].DeepClone();
-                    weights = new float[layers.LongLength - 1][,];
-
-                    // Init hidden layer matrices (layers in-between input & output layers)
-                    for (int i = 1; i < layers.LongLength; i++)
-                        biasWeightCount += layers[i].Length;
-
-                    // Init weight matrices
-                    for (int i = 1; i < layers.LongLength; i++)
-                    {
-                        biasWeightCount += layers[i - 1].Length * layers[i].Length;
-                        weights[i - 1] = new float[layers[i - 1].Length, layers[i].LongLength];
-                    }
+                    case NormalizationMode.MinMaxRange:
+                        return value * (max - min) + min;
+                    case NormalizationMode.DivideMean:
+                        return value * mean;
+                    case NormalizationMode.CutMinDivideMean:
+                        return (value - 1) * (mean - min) + min;
+                    default:
+                        return value;
                 }
+            }
+        }
 
-                public Artificial_NN(float randomizeRange, params NeuralLayer[] layers) : base()
+        public enum DataType
+        {
+            Neglect,
+            Float,
+            DistinctInt
+        }
+
+        public struct UDataInfo
+        {
+            public DataType[] types;
+            public DistinctIntDataInfo[] distinctData;
+            public string[] neglectCats;
+
+            public UDataInfo(string[] categories, params Tuple<string, DataType>[] catTypes)
+            {
+                types = new DataType[categories.Length];
+                for (int i = 0; i < categories.Length; i++)
                 {
-                    if (layers.LongLength < 2)
-                        throw new System.Exception("Neuron network init: insufficient layer count");
-
-                    inputNum = layers[0].Length;
-                    outputNum = layers[layers.LongLength - 1].Length;
-
-                    biasLayers = new NeuralLayer[layers.LongLength];
-                    for (int i = 0; i < biasLayers.LongLength; i++)
-                        biasLayers[i] = (NeuralLayer)layers[i].DeepClone();
-                    weights = new float[layers.LongLength - 1][,];
-
-                    // Init hidden layer matrices (layers in-between input & output layers)
-                    for (int i = 1; i < layers.LongLength; i++)
-                    {
-                        biasWeightCount += layers[i].Length;
-
-                        for (int j = 0; j < biasLayers[i - 1].LongLength; j++)
-                            biasLayers[i - 1].perceptrons[j] = Randomizer.singleton.RandomRange(-randomizeRange, randomizeRange);
-                    }
-
-                    // Init weight matrices
-                    for (int i = 1; i < layers.LongLength; i++)
-                    {
-                        biasWeightCount += layers[i - 1].Length * layers[i].Length;
-                        weights[i - 1] = new float[layers[i - 1].Length, layers[i].LongLength];
-
-                        for (int j = 0; j < weights[i - 1].GetLongLength(0); j++)
-                            for (int k = 0; k < weights[i - 1].GetLongLength(1); k++)
-                                weights[i - 1][j, k] = Randomizer.singleton.RandomRange(-randomizeRange, randomizeRange);
-                    }
-                }
-
-                public void Crossover(INeuralNetwork network)
-                {
-                    Artificial_NN unboxedNetwork;
-
-                    if (network is Artificial_NN)
-                        unboxedNetwork = network as Artificial_NN;
-                    else
-                        throw new Exception("Can not perform crossover between 2 different type of Neural Network!");
-
-                    if (biasLayers.LongLength != unboxedNetwork.biasLayers.LongLength)
-                        throw new Exception("Can not perform crossover between 2 different structures of Artificial Neural Network!");
-
-                    for (int i = 0; i < biasLayers.LongLength; i++)
-                        if (biasLayers[i].LongLength != unboxedNetwork.biasLayers[i].LongLength)
-                            throw new Exception("Can not perform crossover between 2 different structures of Artificial Neural Network!");
-
-                    for (int layerIndex = 0; layerIndex < biasLayers.LongLength; layerIndex++)
-                        for (int biasIndex = 0; biasIndex < biasLayers[layerIndex].LongLength; biasIndex++)
-                            if (Randomizer.singleton.RandomBool())
-                            {
-                                biasLayers[layerIndex].perceptrons[biasIndex] = unboxedNetwork.biasLayers[layerIndex].perceptrons[biasIndex];
-
-                                for (int preLayerBias = 0; preLayerBias < weights[layerIndex].GetLongLength(0); preLayerBias++)
-                                    weights[layerIndex][preLayerBias, biasIndex] = unboxedNetwork.weights[layerIndex][preLayerBias, biasIndex];
-                            }
-                }
-
-                public void Mutate(float mutationRate, INumMutator mutator = null)
-                {
-                    float overallRate = 1 - BTMath.singleton.Pow(1 - mutationRate, biasWeightCount);
-                    float randPick = Randomizer.singleton.RandomFloat();
-
-                    while (overallRate > randPick)
-                    {
-                        int totalIndices = (int)Math.Round(randPick * (biasWeightCount - 1));
-                        int i = 0;
-
-                        do
+                    types[i] = DataType.Neglect;
+                    foreach (var catType in catTypes)
+                        if (catType.Item1 == categories[i])
                         {
-                            totalIndices -= biasLayers[i].Length - 1;
-                            i++;
-                        } while (totalIndices > 0 && i < biasLayers.LongLength);
-
-                        if (totalIndices <= 0)
-                        {
-                            totalIndices += biasLayers[i - 1].Length - 1;
-                            biasLayers[i - 1].perceptrons[totalIndices] = mutator.Mutate(biasLayers[i - 1].perceptrons[totalIndices]);
+                            types[i] = catType.Item2;
+                            break;
                         }
-                        else
+                }
+
+                List<string> negCatList = new List<string>();
+                for (int i = 0; i < categories.Length; i++)
+                    if (types[i] == DataType.Neglect)
+                        negCatList.Add(categories[i]);
+
+                this.distinctData = new DistinctIntDataInfo[0];
+                this.neglectCats = negCatList.ToArray();
+            }
+
+            public UDataInfo(string[] neglectCats, params DataType[] types)
+            {
+                this.types = types;
+                this.distinctData = new DistinctIntDataInfo[0];
+                this.neglectCats = neglectCats;
+            }
+
+            public UDataInfo(DistinctIntDataInfo[] distinctData, string[] neglectCats, params DataType[] types)
+            {
+                this.types = types;
+                this.distinctData = distinctData;
+                this.neglectCats = neglectCats;
+            }
+
+            public UDataInfo(DistinctIntDataInfo[] distinctData, params DataType[] types)
+            {
+                this.types = types;
+                this.distinctData = distinctData;
+                this.neglectCats = new string[0];
+            }
+
+            public UDataInfo(params DataType[] types)
+            {
+                this.types = types;
+                this.distinctData = new DistinctIntDataInfo[0];
+                this.neglectCats = new string[0];
+            }
+        }
+
+        public struct DistinctIntDataInfo
+        {
+            public string category;
+            public string[] encodings;
+
+            public DistinctIntDataInfo(string category, string[] encodings)
+            {
+                this.category = category;
+                this.encodings = encodings;
+            }
+        }
+    }
+
+    namespace Utility
+    {
+        public static class MathBT
+        {
+            public static int DrawProbs(float[] probs)
+            {
+                double rand = new Random().NextDouble();
+
+                for (int i = 0; i < probs.Length; i++)
+                {
+                    rand -= probs[i];
+                    if (rand <= 0)
+                        return i;
+                }
+
+                return -1;
+            }
+        }
+
+        namespace Linear
+        {
+            public static class LinearMethod
+            {
+                public static Vector CGMethod(ISquareMatrix A, Vector b, float epsilon = 1E-6f)
+                {
+                    if (A.dim != b.dim)
+                        throw new Exception("Invalid Conjugate Gradient Method input dims");
+
+                    Vector
+                        result = new float[A.dim],
+                        residual = Vector.Clone(b.content), preResidual = Vector.Clone(b.content),
+                        direction = Vector.Clone(residual.content), scaledDirection = A * direction;
+
+                    if (Vector.Dot(residual, residual) > epsilon)
+                    {
+                        float alpha = Vector.Dot(residual, residual) / Vector.Dot(direction, scaledDirection);
+
+                        result += alpha * direction;
+                        residual -= alpha * scaledDirection;
+                    }
+                    while (Vector.Dot(residual, residual) > epsilon)
+                    {
+                        float beta = Vector.Dot(residual, residual) / Vector.Dot(preResidual, preResidual);
+
+                        direction = residual + beta * direction;
+                        scaledDirection = A * direction;
+
+                        float alpha = Vector.Dot(residual, residual) / Vector.Dot(direction, scaledDirection);
+
+                        preResidual.SetTo(residual);
+                        result += alpha * direction;
+                        residual -= alpha * scaledDirection;
+                    }
+
+                    return result.content;
+                }
+
+                public static Vector CGMethod(ISquareMatrix A, Vector b, IPreconditioner preconditioner, float epsilon = 1E-6f)
+                {
+                    if (A.dim != b.dim)
+                        throw new Exception("Invalid Conjugate Gradient Method input dims");
+
+                    preconditioner.Init(A, b);
+
+                    Vector
+                        result = new float[A.dim],
+                        residual = Vector.Clone(b.content), preResidual = Vector.Clone(b.content),
+                        preconditionedResidual = preconditioner.Forward(residual), prePreconditionedResidual = preconditioner.Forward(residual),
+                        direction = Vector.Clone(preconditionedResidual.content), scaledDirection = A * direction;
+
+                    if (Vector.Dot(residual, residual) > epsilon)
+                    {
+                        float alpha = Vector.Dot(residual, preconditionedResidual) / Vector.Dot(direction, scaledDirection);
+
+                        result += alpha * direction;
+                        residual -= alpha * scaledDirection;
+                    }
+
+                    while (Vector.Dot(residual, residual) > epsilon)
+                    {
+                        preconditionedResidual = preconditioner.Forward(residual);
+
+                        float beta = Vector.Dot(residual, preconditionedResidual) / Vector.Dot(preResidual, prePreconditionedResidual);
+
+                        direction = preconditionedResidual + beta * direction;
+                        scaledDirection = A * direction;
+
+                        float alpha = Vector.Dot(residual, preconditionedResidual) / Vector.Dot(direction, scaledDirection);
+
+                        preResidual.SetTo(residual);
+                        prePreconditionedResidual.SetTo(preconditionedResidual);
+                        result += alpha * direction;
+                        residual -= alpha * scaledDirection;
+                    }
+
+                    return result.content;
+                }
+
+                public static Vector CGNEMethod(IMatrix A, Vector b, float epsilon = 1E-6f)
+                {
+                    if (A.rowCount != b.dim)
+                        throw new Exception("Invalid Conjugate Gradient Method input dims");
+                    IMatrix At = A.Transpose;
+
+                    return CGMethod((At * A).ToSquare, At * b, epsilon);
+                }
+
+                public static Vector CGNEMethod(IMatrix A, Vector b, IPreconditioner preconditioner, float epsilon = 1E-6f)
+                {
+                    if (A.rowCount != b.dim)
+                        throw new Exception("Invalid Conjugate Gradient Method input dims");
+                    IMatrix At = A.Transpose;
+
+                    return CGMethod((At * A).ToSquare, At * b, preconditioner, epsilon);
+                }
+
+                /// <returns>A tuple of a lower matrix and an upper LU factorizations respectively</returns>
+                public static (TriangularMatrix, TriangularMatrix) IncompleteLUFac(ISquareMatrix A, float epsilon = 1E-3f)
+                {
+                    TriangularMatrix lower = new TriangularMatrix(A.dim, false);
+                    TriangularMatrix upper = new TriangularMatrix(A.dim, true);
+
+                    for (int i = 0; i < A.dim; i++)
+                        for (int j = 0; j <= i; j++)
                         {
-                            i = 0;
-
-                            do
+                            if (A.Get(j, i) > epsilon)
                             {
-                                totalIndices -= weights[i].GetLength(0) + weights[i].GetLength(1) - 2;
-                                i++;
-                            } while (totalIndices > 0 && i < weights.LongLength);
+                                // Row iterate
+                                // j : row index
+                                float rowSum = 0;
+                                for (int k = 0; k < j; k++)
+                                    rowSum += lower.Get(j, k) * upper.Get(k, i);
+                                upper.Set(j, i, A.Get(j, i) - rowSum);
+                            }
 
-                            if (totalIndices <= 0)
+                            if (A.Get(i, j) > epsilon)
                             {
-                                totalIndices += weights[i - 1].GetLength(0) + weights[i - 1].GetLength(1) - 2;
-                                int j = 0;
-
-                                do
+                                // Column iterate
+                                // j : column index
+                                if (i == j)
+                                    lower.Set(i, j, 1);
+                                else
                                 {
-                                    totalIndices -= weights[i - 1].GetLength(1) - 1;
-                                    j++;
-                                } while (totalIndices > 0 && j < weights.GetLongLength(0));
+                                    float colSum = 0;
+                                    for (int k = 0; k < j; k++)
+                                        colSum += lower.Get(i, k) * upper.Get(k, j);
 
-                                if (totalIndices <= 0)
-                                {
-                                    totalIndices += weights[i - 1].GetLength(1) - 1;
-                                    weights[i - 1][j - 1, totalIndices] += mutator.Mutate(weights[i - 1][j - 1, totalIndices]);
+                                    lower.Set(i, j, (A.Get(i, j) - colSum) / upper.Get(j, j));
                                 }
                             }
+
                         }
 
-                        randPick += Randomizer.singleton.RandomFloat();
-                    }
+                    return (lower, upper);
                 }
 
-                public void Randomize(float randomizeRange)
+                /// <returns>Lower triangular factorization</returns>
+                public static TriangularMatrix IncompleteCholeskyFac(ISquareMatrix A, float epsilon = 1E-3f)
                 {
-                    for (int i = 0; i < biasLayers.LongLength; i++)
+                    TriangularMatrix result = new TriangularMatrix(A.dim, false);
+
+                    for (int row = 0; row < A.dim; row++)
+                        for (int col = 0; col < row + 1; col++)
+                        {
+                            if (A.Get(row, col) < epsilon)
+                            {
+                                result.Set(row, col, 0);
+                                continue;
+                            }
+
+                            float sum = 0;
+                            for (int i = 0; i < col; i++)
+                                sum += result.Get(row, i) * result.Get(col, i);
+
+                            if (col == row)
+                                result.Set(row, col, MathF.Sqrt(A.Get(row, col) - sum));
+                            else
+                                result.Set(row, col, (A.Get(row, col) - sum) / result.Get(col, col));
+                        }
+
+                    return result;
+                }
+
+                public interface IPreconditioner
+                {
+                    public void Init(ISquareMatrix A, Vector b);
+
+                    public Vector Forward(Vector value);
+                }
+
+                public class LUPreconditioner : IPreconditioner
+                {
+                    public TriangularMatrix lower { get; protected set; }
+                    public TriangularMatrix upper { get; protected set; }
+
+                    public virtual void Init(ISquareMatrix A, Vector b)
                     {
-                        for (int j = 0; j < biasLayers[i].LongLength; j++)
-                            biasLayers[i].perceptrons[j] = Randomizer.singleton.RandomRange(-randomizeRange, randomizeRange);
+                        (lower, upper) = IncompleteLUFac(A);
                     }
 
-                    // Init weight matrices
-                    for (int i = 0; i < weights.LongLength; i++)
-                        for (int j = 0; j < weights[i].GetLongLength(0); j++)
-                            for (int k = 0; k < weights[i].GetLongLength(1); k++)
-                                weights[i][j, k] = Randomizer.singleton.RandomRange(-randomizeRange, randomizeRange);
+                    public virtual Vector Forward(Vector value) => upper.Substitute(lower.Substitute(value));
                 }
 
-                public INeuralNetwork DeepClone()
+                public class CholeskyPreconditioner : LUPreconditioner
                 {
-                    Artificial_NN clone = new Artificial_NN(biasLayers);
+                    public override void Init(ISquareMatrix A, Vector b)
+                    {
+                        lower = IncompleteCholeskyFac(A);
+                        upper = (TriangularMatrix)lower.Transpose;
+                    }
+                }
+            }
 
-                    for (int i = 0; i < clone.biasLayers.LongLength; i++)
-                        clone.biasLayers[i] = (NeuralLayer)biasLayers[i].DeepClone();
+            public interface IMatrix
+            {
+                public int rowCount { get; }
+                public int colCount { get; }
 
-                    for (int i = 0; i < clone.weights.LongLength; i++)
-                        for (int j = 0; j < clone.weights[i].GetLongLength(0); j++)
-                            for (int k = 0; k < clone.weights[i].GetLongLength(1); k++)
-                                clone.weights[i][j, k] = weights[i][j, k];
+                public IMatrix Transpose { get; }
+                public ISquareMatrix ToSquare { get; }
+
+                public IMatrix Instance();
+                public IMatrix InstanceT();
+
+                public float Get(int row, int col);
+                public bool Set(int row, int col, float value);
+
+                public bool SetTo(IMatrix matrix);
+
+                public IMatrix Clone();
+
+                public static int NegOneRaiseTo(int num)
+                {
+                    return num % 2 == 0 ? 1 : -1;
+                }
+
+                public static IMatrix Identity(int dim)
+                {
+                    IMatrix identity = new DiagonalMatrix(dim);
+
+                    for (int i = 0; i < dim; i++)
+                        identity.Set(i, i, 1);
+
+                    return identity;
+                }
+
+                public static IMatrix Diag(params float[] nums)
+                {
+                    IMatrix matrix = new DiagonalMatrix(nums.Length);
+
+                    for (int i = 0; i < nums.Length; i++)
+                        matrix.Set(i, i, nums[i]);
+
+                    return matrix;
+                }
+
+                public Vector Multiply(Vector vector);
+                public Vector LeftMultiply(Vector vector);
+
+                public IMatrix Multiply(IMatrix matrix);
+
+                public IMatrix Add(float value);
+
+                public IMatrix Subtract(float value);
+                public IMatrix LeftSubtract(float value);
+
+                public IMatrix Multiply(float value);
+
+                public IMatrix Divide(float value);
+
+                public static IMatrix operator *(IMatrix A, IMatrix B) => A.Multiply(B);
+                public static Vector operator *(IMatrix matrix, Vector vector) => matrix.Multiply(vector);
+                public static Vector operator *(Vector vector, IMatrix matrix) => matrix.LeftMultiply(vector);
+
+                public static IMatrix operator +(IMatrix matrix, float value) => matrix.Add(value);
+                public static IMatrix operator -(IMatrix matrix, float value) => matrix.Subtract(value);
+                public static IMatrix operator *(IMatrix matrix, float value) => matrix.Multiply(value);
+                public static IMatrix operator /(IMatrix matrix, float value) => matrix.Divide(value);
+
+                public static IMatrix operator +(float value, IMatrix matrix) => matrix.Add(value);
+                public static IMatrix operator -(float value, IMatrix matrix) => matrix.LeftSubtract(value);
+                public static IMatrix operator *(float value, IMatrix matrix) => matrix.Multiply(value);
+            }
+
+            public interface ISquareMatrix : IMatrix
+            {
+                public int dim { get; }
+
+                public ISquareMatrix Invert();
+
+                public float Determinant();
+
+                public float Cofactor(int row, int col);
+
+                public ISquareMatrix Adjugate();
+
+                public static float Cofactor(ISquareMatrix matrix, AdjugateSum adj, float multiplier, bool coefMultiply = false)
+                {
+                    if (multiplier == 0)
+                        return 0;
+
+                    if (matrix.dim - adj.Count == 2)
+                    {
+                        int sum = (matrix.dim - 1) * matrix.dim / 2;
+                        int row1 = adj.SmallestAdjugatableRow, row2 = sum - adj.RowSum - row1,
+                            col1 = adj.SmallestAdjugatableCol, col2 = sum - adj.ColSum - col1;
+
+                        return multiplier * (matrix.Get(row1, col1) * matrix.Get(row2, col2) - matrix.Get(row1, col2) * matrix.Get(row2, col1));
+                    }
+
+                    float result = 0;
+
+                    for (int i = 0; i < matrix.dim; i++)
+                    {
+                        int rowSkip = 0;
+                        var node = adj.rows.First;
+                        while (node != null && node.Value < i)
+                        {
+                            node = node.Next;
+                            rowSkip++;
+                        }
+
+                        if (node != null && node.Value == i)
+                            continue;
+
+                        LinkedListNode<int> rowNode, colNode;
+
+                        int adjCol = adj.SmallestAdjugatableCol, skipCol = adj.SkipAdjCol;
+                        adj.Add(i, adjCol, out rowNode, out colNode);
+                        result += Cofactor(matrix, adj, NegOneRaiseTo(i - rowSkip + adjCol - skipCol)) * matrix.Get(i, adjCol);
+                        adj.Remove(rowNode, colNode);
+                    }
+
+                    return result * multiplier;
+                }
+
+                public static float Cofactor(ISquareMatrix matrix, int row, int col)
+                {
+                    if (matrix.dim == 2)
+                        return NegOneRaiseTo(row + col) * matrix.Get(1 - row, 1 - col);
+
+                    return Cofactor(matrix, new AdjugateSum(row, col), NegOneRaiseTo(row + col));
+                }
+
+                public class AdjugateSum
+                {
+                    public LinkedList<int> rows, cols;
+
+                    public int SmallestAdjugatableRow { get; private set; } = 0;
+                    public int SmallestAdjugatableCol { get; private set; } = 0;
+                    public int SkipAdjCol { get; private set; } = 0;
+                    public int RowSum { get; private set; } = 0;
+                    public int ColSum { get; private set; } = 0;
+                    public int Count => rows.Count;
+
+                    public AdjugateSum()
+                    {
+                        rows = new LinkedList<int>();
+                        cols = new LinkedList<int>();
+                    }
+
+                    public AdjugateSum(int row, int col)
+                    {
+                        rows = new LinkedList<int>();
+                        cols = new LinkedList<int>();
+
+                        Add(row, col);
+                    }
+
+                    public void UpdateColSkip()
+                    {
+                        SkipAdjCol = 0;
+                        var node = cols.First;
+                        while (node != null && node.Value < SmallestAdjugatableCol)
+                        {
+                            node = node.Next;
+                            SkipAdjCol++;
+                        }
+                    }
+
+                    public void Remove(LinkedListNode<int> rowNode, LinkedListNode<int> colNode)
+                    {
+                        RowSum -= rowNode.Value;
+                        ColSum -= colNode.Value;
+
+                        if (rowNode.Value < SmallestAdjugatableRow)
+                            SmallestAdjugatableRow = rowNode.Value;
+
+                        if (colNode.Value < SmallestAdjugatableCol)
+                            SmallestAdjugatableCol = colNode.Value;
+
+                        rows.Remove(rowNode);
+                        cols.Remove(colNode);
+                        UpdateColSkip();
+                    }
+
+                    public void Add(int row, int col)
+                    {
+                        LinkedListNode<int> rowNode, colNode;
+                        Add(row, col, out rowNode, out colNode);
+                    }
+
+                    public void Add(int row, int col, out LinkedListNode<int> rowNode, out LinkedListNode<int> colNode)
+                    {
+                        LinkedListNode<int> node;
+                        rowNode = null;
+                        colNode = null;
+
+                        bool added = false;
+                        node = rows.First;
+                        for (; node != null; node = node.Next)
+                        {
+                            if (node.Value > row)
+                            {
+                                RowSum += row;
+                                rowNode = rows.AddBefore(node, row);
+                                added = true;
+
+                                if (SmallestAdjugatableRow < row)
+                                    break;
+                                row++;
+
+                                while (node != null && node.Value == row)
+                                {
+                                    node = node.Next;
+                                    row++;
+                                }
+                                SmallestAdjugatableRow = row;
+                                break;
+
+                            }
+                            else if (row == node.Value)
+                                break;
+                        }
+
+                        if (!added)
+                        {
+                            RowSum += row;
+                            rowNode = rows.AddLast(row);
+
+                            if (SmallestAdjugatableRow >= row)
+                                SmallestAdjugatableRow = row + 1;
+                        }
+
+                        added = false;
+                        node = cols.First;
+                        for (; node != null; node = node.Next)
+                        {
+                            if (node.Value > col)
+                            {
+                                ColSum += col;
+                                colNode = cols.AddBefore(node, col);
+                                added = true;
+
+                                if (SmallestAdjugatableCol < col)
+                                    break;
+                                col++;
+
+                                while (node != null && node.Value == col)
+                                {
+                                    node = node.Next;
+                                    col++;
+                                }
+                                SmallestAdjugatableCol = col;
+                                break;
+
+                            }
+                            else if (col == node.Value)
+                                break;
+                        }
+
+                        if (!added)
+                        {
+                            ColSum += col;
+                            colNode = cols.AddLast(col);
+
+                            if (SmallestAdjugatableCol >= col)
+                                SmallestAdjugatableCol = col + 1;
+                        }
+                        UpdateColSkip();
+                    }
+                }
+
+                public static ISquareMatrix operator *(ISquareMatrix A, ISquareMatrix B) => A.Multiply(B).ToSquare;
+
+                public static ISquareMatrix operator +(ISquareMatrix matrix, float value) => (ISquareMatrix)matrix.Add(value);
+                public static ISquareMatrix operator -(ISquareMatrix matrix, float value) => (ISquareMatrix)matrix.Subtract(value);
+                public static ISquareMatrix operator *(ISquareMatrix matrix, float value) => (ISquareMatrix)matrix.Multiply(value);
+                public static ISquareMatrix operator /(ISquareMatrix matrix, float value) => (ISquareMatrix)matrix.Divide(value);
+
+                public static ISquareMatrix operator +(float value, ISquareMatrix matrix) => (ISquareMatrix)matrix.Add(value);
+                public static ISquareMatrix operator -(float value, ISquareMatrix matrix) => (ISquareMatrix)matrix.LeftSubtract(value);
+                public static ISquareMatrix operator *(float value, ISquareMatrix matrix) => (ISquareMatrix)matrix.Multiply(value);
+            }
+
+            public class DenseMatrix : IMatrix
+            {
+                public float[][] content;
+                public int rowCount => content.Length;
+                public int colCount => content[0].Length;
+
+                public virtual IMatrix Transpose
+                {
+                    get
+                    {
+                        IMatrix result = InstanceT();
+
+                        for (int i = 0; i < colCount; i++)
+                            for (int j = 0; j < rowCount; j++)
+                                result.Set(i, j, Get(j, i));
+
+                        return result;
+                    }
+                }
+
+                public virtual ISquareMatrix ToSquare
+                {
+                    get
+                    {
+                        if (this is ISquareMatrix)
+                            return (ISquareMatrix)Clone();
+
+                        ISquareMatrix result = new DenseSquareMatrix(rowCount);
+                        result.SetTo(this);
+                        return result;
+                    }
+                }
+
+                public DenseMatrix(int row, int col)
+                {
+                    content = new float[row][];
+
+                    for (int i = 0; i < row; i++)
+                        content[i] = new float[col];
+                }
+
+                public DenseMatrix(float[][] content)
+                {
+                    this.content = content;
+                }
+
+                public virtual IMatrix Instance() => new DenseMatrix(rowCount, colCount);
+
+                public virtual IMatrix InstanceT() => new DenseMatrix(colCount, rowCount);
+
+                public virtual float Get(int row, int col) => content[row][col];
+
+                public virtual bool Set(int row, int col, float value)
+                {
+                    content[row][col] = value;
+                    return true;
+                }
+
+                public virtual bool SetTo(IMatrix matrix)
+                {
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            Set(i, j, matrix.Get(i, j));
+
+                    return true;
+                }
+
+                public virtual IMatrix Clone()
+                {
+                    IMatrix result = Instance();
+                    result.SetTo(this);
+
+                    return result;
+                }
+
+                public virtual Vector Multiply(Vector vector)
+                {
+                    if (colCount != vector.dim)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    float[] result = new float[rowCount];
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result[i] += Get(i, j) * vector.content[j];
+
+                    return result;
+                }
+
+                public virtual Vector LeftMultiply(Vector vector)
+                {
+                    if (rowCount != vector.dim)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    float[] result = new float[colCount];
+
+                    for (int i = 0; i < colCount; i++)
+                        for (int j = 0; j < rowCount; j++)
+                            result[i] += Get(i, j) * vector.content[j];
+
+                    return result;
+                }
+
+                public virtual IMatrix Multiply(IMatrix matrix)
+                {
+                    if (colCount != matrix.rowCount)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    IMatrix result = new DenseMatrix(rowCount, matrix.colCount);
+
+                    for (int row = 0; row < rowCount; row++)
+                        for (int col = 0; col < matrix.colCount; col++)
+                            for (int i = 0; i < colCount; i++)
+                                result.Set(row, col, result.Get(row, col) + Get(row, i) * matrix.Get(i, col));
+
+                    return result;
+                }
+
+                public virtual IMatrix Add(float value)
+                {
+                    IMatrix result = Instance();
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result.Set(i, j, Get(i, j) + value);
+
+                    return result;
+                }
+
+                public virtual IMatrix Subtract(float value)
+                {
+                    return Add(-value);
+                }
+
+                public virtual IMatrix LeftSubtract(float value)
+                {
+                    IMatrix result = Instance();
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result.Set(i, j, value - Get(i, j));
+
+                    return result;
+                }
+
+                public virtual IMatrix Multiply(float value)
+                {
+                    IMatrix result = Instance();
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result.Set(i, j, Get(i, j) * value);
+
+                    return result;
+                }
+
+                public virtual IMatrix Divide(float value)
+                {
+                    IMatrix result = Instance();
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result.Set(i, j, Get(i, j) / value);
+
+                    return result;
+                }
+            }
+
+            public class DenseSquareMatrix : DenseMatrix, ISquareMatrix
+            {
+                public int dim => content.Length;
+
+                public DenseSquareMatrix(int dim) : base(dim, dim) { }
+
+                public DenseSquareMatrix(float[][] content) : base(content)
+                {
+                    if (content.Length != content[0].Length)
+                        throw new Exception("Invalid square matrix content");
+                }
+
+                public override IMatrix Instance() => new DenseSquareMatrix(dim);
+                public override IMatrix InstanceT() => new DenseSquareMatrix(dim);
+
+                public virtual ISquareMatrix Invert()
+                {
+                    return (ISquareMatrix)Adjugate().Divide(Determinant());
+                }
+
+                public virtual float Determinant()
+                {
+                    if (dim == 1)
+                        return content[0][0];
+                    else if (dim == 2)
+                        return content[0][0] * content[1][1] - content[1][0] * content[0][1];
+                    else
+                    {
+                        float result = 0;
+
+                        for (int i = 0; i < dim; i++)
+                            result += Cofactor(i, 0) * content[i][0];
+
+                        return result;
+                    }
+                }
+
+                public virtual float Cofactor(int row, int col)
+                {
+                    return ISquareMatrix.Cofactor(this, row, col);
+                }
+
+                public virtual ISquareMatrix Adjugate()
+                {
+                    ISquareMatrix result = (ISquareMatrix)Instance();
+
+                    for (int i = 0; i < dim; i++)
+                        for (int j = 0; j < dim; j++)
+                            result.Set(i, j, Cofactor(j, i));
+
+                    return result;
+                }
+            }
+
+            public class DiagonalMatrix : ISquareMatrix
+            {
+                public float[] content;
+
+                public int dim => content.Length;
+                public int rowCount => content.Length;
+                public int colCount => content.Length;
+
+                public IMatrix Transpose => Clone();
+
+                public ISquareMatrix ToSquare => (ISquareMatrix)Clone();
+
+                public DiagonalMatrix(int dim)
+                {
+                    content = new float[dim];
+                }
+
+                public DiagonalMatrix(float[] content)
+                {
+                    this.content = content;
+                }
+
+                public virtual IMatrix Instance() => new DiagonalMatrix(dim);
+                public virtual IMatrix InstanceT() => Instance();
+
+                public virtual float Get(int row, int col)
+                {
+                    if (row >= rowCount || col >= colCount)
+                        throw new Exception("Matrix entry out of bound");
+
+                    return row == col ? content[row] : 0;
+                }
+
+                public virtual bool Set(int row, int col, float value)
+                {
+                    if (row >= rowCount || col >= colCount)
+                        throw new Exception("Matrix entry out of bound");
+
+                    if (row != col)
+                        return false;
+
+                    content[row] = value;
+                    return true;
+                }
+
+                public virtual bool SetTo(IMatrix matrix)
+                {
+                    if (!(matrix is DiagonalMatrix) || matrix.rowCount != dim)
+                        return false;
+
+                    for (int i = 0; i < dim; i++)
+                        Set(i, i, matrix.Get(i, i));
+                    return true;
+                }
+
+                public virtual IMatrix Clone()
+                {
+                    IMatrix matrix = Instance();
+                    matrix.SetTo(this);
+                    return matrix;
+                }
+
+                public virtual ISquareMatrix Invert()
+                {
+                    ISquareMatrix result = (ISquareMatrix)Instance();
+
+                    for (int i = 0; i < dim; i++)
+                        result.Set(i, i, 1 / Get(i, i));
+
+                    return result;
+                }
+
+                public virtual float Determinant()
+                {
+                    float result = 1;
+                    for (int i = 0; i < dim; i++)
+                        result *= Get(i, i);
+
+                    return result;
+                }
+
+                public virtual float Cofactor(int row, int col)
+                {
+                    if (row != col)
+                        return 0;
+
+                    float result = 1;
+
+                    for (int i = 0; i < row; i++)
+                        result *= Get(i, i);
+                    for (int i = row + 1; i < dim; i++)
+                        result *= Get(i, i);
+
+                    return result;
+                }
+
+                public virtual ISquareMatrix Adjugate()
+                {
+                    ISquareMatrix result = (ISquareMatrix)Instance();
+                    for (int i = 0; i < dim; i++)
+                        result.Set(i, i, Cofactor(i, i));
+
+                    return result;
+                }
+
+                public virtual Vector Multiply(Vector vector)
+                {
+                    if (colCount != vector.dim)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    float[] result = new float[rowCount];
+
+                    for (int i = 0; i < dim; i++)
+                        result[i] += Get(i, i) * vector.content[i];
+
+                    return result;
+                }
+
+                public virtual Vector LeftMultiply(Vector vector)
+                {
+                    if (rowCount != vector.dim)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    float[] result = new float[colCount];
+
+                    for (int i = 0; i < dim; i++)
+                        result[i] += Get(i, i) * vector.content[i];
+
+                    return result;
+                }
+
+                public virtual IMatrix Multiply(IMatrix matrix)
+                {
+                    if (colCount != matrix.rowCount)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    IMatrix result = new DenseMatrix(rowCount, matrix.colCount);
+
+                    for (int row = 0; row < rowCount; row++)
+                        for (int col = 0; col < matrix.colCount; col++)
+                            result.Set(row, col, Get(row, col) * matrix.Get(col, col));
+
+                    return result;
+                }
+
+                public virtual IMatrix Add(float value)
+                {
+                    IMatrix result = new DenseSquareMatrix(dim);
+
+                    for (int i = 0; i < dim; i++)
+                        for (int j = 0; j < dim; j++)
+                            result.Set(i, j, Get(i, j) + value);
+
+                    return result;
+                }
+
+                public virtual IMatrix Subtract(float value)
+                {
+                    return Add(-value);
+                }
+
+                public virtual IMatrix LeftSubtract(float value)
+                {
+                    IMatrix result = new DenseSquareMatrix(dim);
+
+                    for (int i = 0; i < dim; i++)
+                        for (int j = 0; j < dim; j++)
+                            result.Set(i, j, value - Get(i, j));
+
+                    return result;
+                }
+
+                public virtual IMatrix Multiply(float value)
+                {
+                    IMatrix result = Instance();
+
+                    for (int i = 0; i < dim; i++)
+                        result.Set(i, i, Get(i, i) * value);
+
+                    return result;
+                }
+
+                public virtual IMatrix Divide(float value)
+                {
+                    IMatrix result = Instance();
+
+                    for (int i = 0; i < dim; i++)
+                        result.Set(i, i, Get(i, i) / value);
+
+                    return result;
+                }
+            }
+
+            public class TriangularMatrix : ISquareMatrix
+            {
+                public float[] content;
+                public bool isUpper;
+
+                public int dim { get; protected set; }
+                public int rowCount => dim;
+                public int colCount => dim;
+
+                public virtual IMatrix Transpose
+                {
+                    get
+                    {
+                        TriangularMatrix result = (TriangularMatrix)Clone();
+                        result.isUpper = !isUpper;
+                        return result;
+                    }
+                }
+
+                public ISquareMatrix ToSquare => (ISquareMatrix)Clone();
+
+                public TriangularMatrix(int dim, bool isUpper)
+                {
+                    content = new float[(dim * (1 + dim)) >> 1];
+                    this.isUpper = isUpper;
+                    this.dim = dim;
+                }
+
+                public TriangularMatrix(float[] content, bool isUpper)
+                {
+                    this.content = content;
+                    this.isUpper = isUpper;
+                    this.dim = (int)(MathF.Sqrt(1 + 8 * content.Length) - 1) >> 1;
+                }
+
+                public virtual IMatrix Instance() => new TriangularMatrix(dim, isUpper);
+                public virtual IMatrix InstanceT() => new TriangularMatrix(dim, !isUpper);
+
+                public virtual float Get(int row, int col)
+                {
+                    if (row >= rowCount || col >= colCount)
+                        throw new Exception("Matrix entry out of bound");
+
+                    if ((row > col) == isUpper && row != col)
+                        return 0;
+
+                    if (isUpper)
+                        return content[((col * (1 + col)) >> 1) + row];
+                    else
+                        return content[((row * (1 + row)) >> 1) + col];
+                }
+
+                public virtual bool Set(int row, int col, float value)
+                {
+                    if (row >= rowCount || col >= colCount)
+                        throw new Exception("Matrix entry out of bound");
+
+                    if ((row > col) == isUpper && row != col)
+                        return false;
+
+                    if (isUpper)
+                        content[((col * (1 + col)) >> 1) + row] = value;
+                    else
+                        content[((row * (1 + row)) >> 1) + col] = value;
+
+                    return true;
+                }
+
+                public virtual Vector Substitute(Vector rhs)
+                {
+                    if (rhs.dim != dim)
+                        throw new Exception("Invalid inputs for triangular substitution");
+
+                    Vector result = new Vector(dim);
+
+                    if (isUpper)
+                    {
+                        for (int i = dim - 1; i >= 0; i--)
+                        {
+                            result.content[i] = rhs.content[i];
+                            for (int j = i + 1; j < dim; j++)
+                                result.content[i] -= result.content[j] * Get(i, j);
+                            result.content[i] /= Get(i, i);
+                        }
+                    }
+                    else
+                    {
+                        for (int i = 0; i < dim; i++)
+                        {
+                            result.content[i] = rhs.content[i];
+                            for (int j = 0; j < i; j++)
+                                result.content[i] -= result.content[j] * Get(i, j);
+                            result.content[i] /= Get(i, i);
+                        }
+                    }
+
+                    return result;
+                }
+
+                public virtual bool SetTo(IMatrix matrix)
+                {
+                    if (!(matrix is DiagonalMatrix || matrix is TriangularMatrix) || matrix.rowCount != dim)
+                        return false;
+
+                    if (isUpper)
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = i; j < dim; j++)
+                                Set(i, j, matrix.Get(i, j));
+                    }
+                    else
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = 0; j <= i; j++)
+                                Set(i, j, matrix.Get(i, j));
+                    }
+
+                    return true;
+                }
+
+                public virtual IMatrix Clone()
+                {
+                    IMatrix matrix = Instance();
+                    matrix.SetTo(this);
+                    return matrix;
+                }
+
+                public virtual ISquareMatrix Invert()
+                {
+                    ISquareMatrix result = (ISquareMatrix)Instance();
+                    float det = Determinant();
+
+                    if (isUpper)
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = i; j < dim; j++)
+                                result.Set(i, j, IMatrix.NegOneRaiseTo(i + j) * Cofactor(j, i) / det);
+                    }
+                    else
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = 0; j <= i; j++)
+                                result.Set(i, j, IMatrix.NegOneRaiseTo(i + j) * Cofactor(j, i) / det);
+                    }
+
+                    return result;
+                }
+
+                public virtual float Determinant()
+                {
+                    float result = 1;
+                    for (int i = 0; i < dim; i++)
+                        result *= Get(i, i);
+
+                    return result;
+                }
+
+                public virtual float Cofactor(int row, int col)
+                {
+                    if (row > col != isUpper)
+                        return 0;
+
+                    if (row == col)
+                        return Determinant() / Get(row, col);
+
+                    return ISquareMatrix.Cofactor(this, row, col);
+                }
+
+                public virtual ISquareMatrix Adjugate()
+                {
+                    ISquareMatrix result = (ISquareMatrix)Instance();
+
+                    if (isUpper)
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = i; j < dim; j++)
+                                result.Set(i, j, IMatrix.NegOneRaiseTo(i + j) * Cofactor(j, i));
+                    }
+                    else
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = 0; j <= i; j++)
+                                result.Set(i, j, IMatrix.NegOneRaiseTo(i + j) * Cofactor(j, i));
+                    }
+
+                    return result;
+                }
+
+                public virtual Vector Multiply(Vector vector)
+                {
+                    if (dim != vector.dim)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    float[] result = new float[dim];
+
+                    if (isUpper)
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = i; j < dim; j++)
+                                result[i] += Get(i, j) * vector.content[j];
+                    }
+                    else
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = 0; j <= i; j++)
+                                result[i] += Get(i, j) * vector.content[j];
+                    }
+
+                    return result;
+                }
+
+                public virtual Vector LeftMultiply(Vector vector)
+                {
+                    if (dim != vector.dim)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    float[] result = new float[dim];
+
+                    if (isUpper)
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = i; j < dim; j++)
+                                result[j] += Get(i, j) * vector.content[i];
+                    }
+                    else
+                    {
+                        for (int i = 0; i < dim; i++)
+                            for (int j = 0; j <= i; j++)
+                                result[j] += Get(i, j) * vector.content[i];
+                    }
+
+                    return result;
+                }
+
+                public virtual IMatrix Multiply(IMatrix matrix)
+                {
+                    if (colCount != matrix.rowCount)
+                        throw new Exception("Invalid input matrices for matrix multiplication");
+
+                    IMatrix result = new DenseMatrix(rowCount, matrix.colCount);
+
+                    if (isUpper)
+                    {
+                        for (int row = 0; row < rowCount; row++)
+                            for (int col = 0; col < matrix.colCount; col++)
+                                for (int i = row; i < colCount; i++)
+                                    result.Set(row, col, result.Get(row, col) + Get(row, i) * matrix.Get(i, col));
+                    }
+                    else
+                    {
+                        for (int row = 0; row < rowCount; row++)
+                            for (int col = 0; col < matrix.colCount; col++)
+                                for (int i = 0; i <= row; i++)
+                                    result.Set(row, col, result.Get(row, col) + Get(row, i) * matrix.Get(i, col));
+                    }
+
+                    return result;
+                }
+
+                public virtual IMatrix Add(float value)
+                {
+                    IMatrix result = new DenseSquareMatrix(dim);
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result.Set(i, j, Get(i, j) + value);
+
+                    return result;
+                }
+
+                public virtual IMatrix Subtract(float value)
+                {
+                    return Add(-value);
+                }
+
+                public virtual IMatrix LeftSubtract(float value)
+                {
+                    IMatrix result = new DenseSquareMatrix(dim);
+
+                    for (int i = 0; i < rowCount; i++)
+                        for (int j = 0; j < colCount; j++)
+                            result.Set(i, j, value - Get(i, j));
+
+                    return result;
+                }
+
+                public virtual IMatrix Multiply(float value)
+                {
+                    TriangularMatrix result = (TriangularMatrix)Instance();
+
+                    for (int i = 0; i < content.Length; i++)
+                        result.content[i] = content[i] * value;
+
+                    return result;
+                }
+
+                public virtual IMatrix Divide(float value)
+                {
+                    TriangularMatrix result = (TriangularMatrix)Instance();
+
+                    for (int i = 0; i < content.Length; i++)
+                        result.content[i] = content[i] / value;
+
+                    return result;
+                }
+            }
+
+            public class Vector
+            {
+                public float[] content;
+
+                public int dim => content.Length;
+
+                public IMatrix ToMatrix
+                {
+                    get
+                    {
+                        IMatrix result = new DenseMatrix(1, dim);
+                        for (int i = 0; i < dim; i++)
+                            result.Set(0, i, content[i]);
+
+                        return result;
+                    }
+                }
+
+                public Vector(float[] content)
+                {
+                    this.content = content;
+                }
+
+                public Vector(int size)
+                {
+                    this.content = new float[size];
+                }
+
+                public void SetTo(Vector vector)
+                {
+                    for (int i = 0; i < dim; i++)
+                        content[i] = vector.content[i];
+                }
+
+                public Vector Clone()
+                {
+                    Vector clone = new Vector(dim);
+
+                    for (int i = 0; i < dim; i++)
+                        clone.content[i] = content[i];
 
                     return clone;
                 }
 
-                public string ToJson()
+                public static Vector Clone(float[] content)
                 {
-                    throw new NotImplementedException();
-                }
+                    Vector clone = new Vector(content.Length);
 
-                public T FromJson<T>(string json)
-                {
-                    throw new NotImplementedException();
-                }
-
-                #region Forward Propagation
-                public float[] Predict(params float[] inputs)
-                {
-                    if (inputs.LongLength != inputNum)
-                        throw new System.Exception("Neuron network fw propagation: mismatched input count");
-
-                    return ForwardPropagateUncheck(inputs);
-                }
-
-                float[] ForwardPropagateUncheck(float[] inputs, int startingLayer = 1)
-                {
-                    if (startingLayer < biasLayers.LongLength)
-                        return ForwardPropagateUncheck(SingalForwardPropagateUncheck(startingLayer, inputs), startingLayer + 1);
-
-                    return inputs;
-                }
-
-                /// <summary>
-                /// Singal propagate from a given layer 
-                /// </summary>
-                /// <param name="fromLayer">Index starting from 1</param>
-                /// <param name="inputs">Inputs of the given layer</param>
-                /// <returns></returns>
-                /// <exception cref="System.Exception"></exception>
-                public float[] SingalForwardProgagate(int fromLayer, float[] inputs)
-                {
-                    if (fromLayer < 0 || fromLayer >= biasLayers.LongLength + 1)
-                        throw new System.Exception("Neuron network singal fw propagation: passed layer is out of bound");
-
-                    if ((fromLayer == 0 && inputs.LongLength != inputNum) ||
-                        inputs.LongLength != biasLayers[fromLayer - 1].LongLength)
-                        throw new System.Exception("Neuron network singal fw propagation: mismatched input count");
-
-                    return SingalForwardPropagateUncheck(fromLayer, inputs);
-                }
-
-                float[] SingalForwardPropagateUncheck(int fromLayer, float[] inputs)
-                {
-                    float[] outputs = new float[biasLayers[fromLayer].LongLength];
-
-                    for (int i = 0; i < outputs.LongLength; i++)
-                    {
-                        outputs[i] = biasLayers[fromLayer].perceptrons[i];
-
-                        for (int j = 0; j < inputs.LongLength; j++)
-                            outputs[i] += weights[fromLayer - 1][j, i] * inputs[j];
-
-                        outputs[i] = biasLayers[fromLayer].Forward(outputs[i]);
-                    }
-
-                    return outputs;
-                }
-
-                #endregion
-
-                #region NeuralLayer
-                public class NeuralLayer : IDeepClonable<NeuralLayer>
-                {
-                    public float[] perceptrons;
-
-                    public long LongLength { get => perceptrons.LongLength; }
-
-                    public int Length { get => perceptrons.Length; }
-
-                    public NeuralLayer(int perceptronCount)
-                    {
-                        perceptrons = new float[perceptronCount];
-                    }
-
-                    public virtual NeuralLayer DeepClone()
-                    {
-                        NeuralLayer clone = new NeuralLayer(Length);
-
-                        for (int i = 0; i < clone.perceptrons.LongLength; i++)
-                            clone.perceptrons[i] = perceptrons[i];
-
-                        return clone;
-                    }
-
-                    public virtual float Forward(float input)
-                    {
-                        return input;
-                    }
-
-                    public static implicit operator NeuralLayer(int perceptronCount)
-                    {
-                        return new NeuralLayer(perceptronCount);
-                    }
-                }
-
-                public class ActivationLayer : NeuralLayer
-                {
-                    public ActivationFunc func;
-
-                    public ActivationLayer(int perceptron, ActivationFunc func) : base(perceptron)
-                    {
-                        this.func = func;
-                    }
-
-                    public override NeuralLayer DeepClone()
-                    {
-                        ActivationLayer clone = new ActivationLayer(perceptrons.Length, func);
-
-                        for (int i = 0; i < clone.perceptrons.LongLength; i++)
-                            clone.perceptrons[i] = perceptrons[i];
-
-                        return clone;
-                    }
-
-                    public override float Forward(float input)
-                    {
-                        switch (func)
-                        {
-                            case ActivationFunc.Linear:
-                                return input;
-                            case ActivationFunc.Tanh:
-                                return (2 / (1 + BTMath.singleton.Exp(-2 * input))) - 1;
-                            case ActivationFunc.Sigmoid:
-                                return 1 / (1 + BTMath.singleton.Exp(-input));
-                            case ActivationFunc.Squared:
-                                return input * input;
-                            case ActivationFunc.Absolute:
-                                return input < 0 ? -input : input;
-                            case ActivationFunc.ReLU:
-                                return input < 0 ? 0 : input;
-                            case ActivationFunc.Inverse:
-                                return -input;
-                            default:
-                                return input;
-                        }
-                    }
-                }
-                #endregion
-            }
-
-            public interface INeuralNetwork : IDeepClonable<INeuralNetwork>, ICustomSerializable
-            {
-                float[] Predict(params float[] inputs);
-
-                void Crossover(INeuralNetwork network);
-
-                void Mutate(float mutationRate, INumMutator mutator = null);
-
-                abstract string ICustomSerializable.ToJson();
-
-                abstract T ICustomSerializable.FromJson<T>(string json);
-            }
-
-            #endregion
-
-            #region Number Mutator
-
-            public class GaussianAdditiveNumMutator : INumMutator
-            {
-                public float stdev;
-
-                public GaussianAdditiveNumMutator(float stdev)
-                {
-                    this.stdev = stdev;
-                }
-
-                public float Mutate(float value)
-                {
-                    return Randomizer.singleton.SignedGaussian(value, stdev);
-                }
-            }
-
-            public class AdditiveNumMutator : INumMutator
-            {
-                public float additiveRange;
-
-                public AdditiveNumMutator(float additiveRange)
-                {
-                    this.additiveRange = additiveRange;
-                }
-
-                public float Mutate(float value)
-                {
-                    return value + Randomizer.singleton.RandomRange(-additiveRange, additiveRange);
-                }
-            }
-
-            public interface INumMutator
-            {
-                float Mutate(float value);
-            }
-
-            #endregion
-
-            [Serializable]
-            public class InnovationList<TValue> : IDictionary<int, List<TValue>>, IDeepClonable<InnovationList<TValue>> where TValue : IDeepClonable<TValue>, InnovationListItem
-            {
-                public event Action<int, TValue> onAdd, onRemove;
-
-                Dictionary<int, List<TValue>> dic;
-
-                public int Count => dic.Count;
-
-                public ICollection<int> Keys => dic.Keys;
-
-                public ICollection<List<TValue>> Values => dic.Values;
-
-                public bool IsReadOnly => ((ICollection<KeyValuePair<int, List<TValue>>>)dic).IsReadOnly;
-
-                public InnovationList()
-                {
-                    dic = new Dictionary<int, List<TValue>>();
-                }
-
-                public int FindValueNum()
-                {
-                    int valueCount = 0;
-
-                    foreach (int innovationNum in Keys)
-                        for (int i = 0, count = dic[innovationNum].Count; i < count; i++)
-                            valueCount++;
-
-                    return valueCount;
-                }
-
-                public TValue PickRandom(int fromInnovation = 0, int toInnovation = -1)
-                {
-                    if (toInnovation == -1)
-                        return PickRandom(dic[dic.ElementAt(Randomizer.singleton.RandomRange(fromInnovation, dic.Count - 1)).Key]);
-                    else
-                        return PickRandom(dic[dic.ElementAt(Randomizer.singleton.RandomRange(fromInnovation, dic.Count - 1)).Key]);
-                }
-
-                public TValue PickRandom(out int innovationNum, int fromInnovation = 0, int toInnovation = -1)
-                {
-                    if (toInnovation == -1)
-                        return PickRandom(dic[innovationNum = dic.ElementAt(Randomizer.singleton.RandomRange(fromInnovation, dic.Count - 1)).Key]);
-                    else
-                        return PickRandom(dic[innovationNum = dic.ElementAt(Randomizer.singleton.RandomRange(fromInnovation, dic.Count - 1)).Key]);
-                }
-
-                public TValue PickRandom(out int innovationNum, out int innerListIndex, int fromInnovation = 0, int toInnovation = -1)
-                {
-                    if (toInnovation == -1)
-                        return PickRandom(dic[innovationNum = dic.ElementAt(Randomizer.singleton.RandomRange(fromInnovation, dic.Count - 1)).Key], out innerListIndex);
-                    else
-                        return PickRandom(dic[innovationNum = dic.ElementAt(Randomizer.singleton.RandomRange(fromInnovation, toInnovation)).Key], out innerListIndex);
-                }
-
-                static TValue PickRandom(List<TValue> list) => list[Randomizer.singleton.RandomRange(0, list.Count - 1)];
-
-                static TValue PickRandom(List<TValue> list, out int index)
-                {
-                    index = Randomizer.singleton.RandomRange(0, list.Count - 1);
-
-
-                    return list[index];
-                }
-
-                public List<TValue> this[int key] { get => dic[key]; set => dic[key] = value; }
-
-                public void Add(int innovationNum, TValue value)
-                {
-                    if (ContainsKey(innovationNum))
-                    {
-                        onAdd?.Invoke(innovationNum, value);
-                        value.OnAdd(innovationNum);
-                        this[innovationNum].Add(value);
-                    }
-                    else
-                        Add(innovationNum, new List<TValue>() { value });
-                }
-
-                public bool Remove(int innovationNum, TValue value)
-                {
-                    if (ContainsKey(innovationNum))
-                    {
-                        if (this[innovationNum].Remove(value))
-                        {
-                            onRemove?.Invoke(innovationNum, value);
-                            value.OnRemove(innovationNum);
-                            return true;
-                        }
-                    }
-
-                    return false;
-                }
-
-                public void RemoveAt(int innovationNum, int innerListIndex)
-                {
-                    TValue removeValue = this[innovationNum][innerListIndex];
-                    this[innovationNum].RemoveAt(innerListIndex);
-                    onRemove?.Invoke(innovationNum, removeValue);
-                    removeValue.OnRemove(innovationNum);
-                }
-
-                public bool ContainsKey(int key)
-                {
-                    return dic.ContainsKey(key);
-                }
-
-                public void Add(int innovationNum, List<TValue> values)
-                {
-                    if (ContainsKey(innovationNum))
-                    {
-                        for (int i = 0; i < values.Count; i++)
-                            this.Add(innovationNum, values[i]);
-                    }
-                    else
-                    {
-                        dic.Add(innovationNum, values);
-
-                        for (int i = 0; i < values.Count; i++)
-                        {
-                            onAdd?.Invoke(innovationNum, values[i]);
-                            values[i].OnAdd(innovationNum);
-                        }
-                    }
-                }
-
-                public bool Remove(int innovationNum)
-                {
-                    TValue[] removeValues = this[innovationNum].ToArray();
-
-                    if (!dic.Remove(innovationNum))
-                        return false;
-
-                    for (int i = 0; i < removeValues.Length; i++)
-                    {
-                        onRemove?.Invoke(innovationNum, removeValues[i]);
-                        removeValues[i].OnRemove(innovationNum);
-                    }
-
-                    return true;
-                }
-
-                public bool TryGetValue(int innovationNum, out List<TValue> values)
-                {
-                    return dic.TryGetValue(innovationNum, out values);
-                }
-
-                public void Add(KeyValuePair<int, List<TValue>> item)
-                {
-                    Add(item.Key, item.Value);
-                }
-
-                public void Clear()
-                {
-                    foreach (int innovationNum in dic.Keys)
-                        for (int i = 0, count = dic[innovationNum].Count; i < count; i++)
-                        {
-                            onRemove?.Invoke(innovationNum, dic[innovationNum][i]);
-                            dic[innovationNum][i].OnRemove(innovationNum);
-                        }
-
-                    ((ICollection<KeyValuePair<int, List<TValue>>>)dic).Clear();
-                }
-
-                public bool Contains(KeyValuePair<int, List<TValue>> item)
-                {
-                    return ((ICollection<KeyValuePair<int, List<TValue>>>)dic).Contains(item);
-                }
-
-                public void CopyTo(KeyValuePair<int, List<TValue>>[] array, int arrayIndex)
-                {
-                    ((ICollection<KeyValuePair<int, List<TValue>>>)dic).CopyTo(array, arrayIndex);
-                }
-
-                public bool Remove(KeyValuePair<int, List<TValue>> item)
-                {
-                    if (!((ICollection<KeyValuePair<int, List<TValue>>>)dic).Remove(item))
-                        return false;
-
-                    for (int i = 0; i < item.Value.Count; i++)
-                    {
-                        onAdd?.Invoke(item.Key, item.Value[i]);
-                        item.Value[i].OnRemove(item.Key);
-                    }
-
-                    return true;
-                }
-
-                public IEnumerator<KeyValuePair<int, List<TValue>>> GetEnumerator()
-                {
-                    return ((IEnumerable<KeyValuePair<int, List<TValue>>>)dic).GetEnumerator();
-                }
-
-                IEnumerator IEnumerable.GetEnumerator()
-                {
-                    return ((IEnumerable)dic).GetEnumerator();
-                }
-
-                public InnovationList<TValue> DeepClone()
-                {
-                    InnovationList<TValue> clone = new InnovationList<TValue>();
-
-                    foreach (int key in Keys)
-                    {
-                        clone[key] = new List<TValue>();
-
-                        for (int i = 0; i < this[key].Count; i++)
-                            clone[key].Add(this[key][i].DeepClone());
-                    }
-
-                    clone.onAdd = (Action<int, TValue>)onAdd.Clone();
+                    for (int i = 0; i < clone.dim; i++)
+                        clone.content[i] = content[i];
 
                     return clone;
                 }
+
+                public static float[] Add(float[] a, float[] b)
+                {
+                    if (a.LongLength != b.LongLength)
+                        throw new Exception("Invalid input vectors for dot product");
+
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] + b[i];
+
+                    return result;
+                }
+
+                public static float[] Add(float[] a, float b)
+                {
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] + b;
+
+                    return result;
+                }
+
+                public static float[] Add(float b, float[] a)
+                {
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] + b;
+
+                    return result;
+                }
+
+                public static float[] Subtract(float[] a, float[] b)
+                {
+                    if (a.LongLength != b.LongLength)
+                        throw new Exception("Invalid input vectors for dot product");
+
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] - b[i];
+
+                    return result;
+                }
+
+                public static float[] Subtract(float[] a, float b)
+                {
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] - b;
+
+                    return result;
+                }
+
+                public static float[] Subtract(float b, float[] a)
+                {
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = b - a[i];
+
+                    return result;
+                }
+
+                public static float[] Multiply(float[] a, float b)
+                {
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] * b;
+
+                    return result;
+                }
+
+                public static float[] Divide(float[] a, float b)
+                {
+                    float[] result = new float[a.LongLength];
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result[i] = a[i] / b;
+
+                    return result;
+                }
+
+                public static float Dot(float[] a, float[] b)
+                {
+                    if (a.LongLength != b.LongLength)
+                        throw new Exception("Invalid input vectors for dot product");
+
+                    float result = 0;
+
+                    for (int i = 0; i < a.LongLength; i++)
+                        result += a[i] * b[i];
+
+                    return result;
+                }
+
+                public static float Dot(Vector a, Vector b) => Dot(a.content, b.content);
+
+                public static implicit operator Vector(float[] content) => new Vector(content);
+
+                public static Vector operator +(Vector a, Vector b) => Add(a.content, b.content);
+                public static Vector operator +(Vector a, float b) => Add(a.content, b);
+                public static Vector operator +(float b, Vector a) => Add(a.content, b);
+
+                public static Vector operator -(Vector a, Vector b) => Subtract(a.content, b.content);
+                public static Vector operator -(Vector a, float b) => Subtract(a.content, b);
+                public static Vector operator -(float b, Vector a) => Subtract(b, a.content);
+
+                public static Vector operator *(Vector a, float b) => Multiply(a.content, b);
+                public static Vector operator *(float b, Vector a) => Multiply(a.content, b);
+                public static Vector operator /(Vector a, float b) => Divide(a.content, b);
             }
         }
-    }
-
-    #region Randmizer
-
-    public abstract class Randomizer
-    {
-        static Randomizer _singleton;
-        public static Randomizer singleton
-        {
-            get
-            {
-                if (_singleton == null)
-                    _singleton = new UnityRandomizer();
-
-                return _singleton;
-            }
-            set => _singleton = value;
-        }
-
-        public abstract float Gaussian(float mean, float stdev);
-
-        public abstract float SignedGaussian(float mean, float stdev);
-
-        public abstract int RandomRange(int min, int max);
-
-        public abstract float RandomRange(float min, float max);
-
-        /// <summary>
-        /// 
-        /// </summary>
-        /// <returns>A float of a value between 0.0f and 1.0f</returns>
-        public abstract float RandomFloat();
-
-        public abstract bool RandomBool();
-    }
-
-    public class UnityRandomizer : Randomizer
-    {
-        public override float Gaussian(float mean, float stdev)
-        {
-            return
-                BTMath.singleton.Sqrt(-2 * BTMath.singleton.Log(RandomFloat())) * BTMath.singleton.Cos(2 * BTMath.singleton.PI * RandomFloat()) * stdev + mean;
-        }
-
-        public override float SignedGaussian(float mean, float stdev)
-        {
-            return
-                (RandomRange(0, 1) * 2 - 1) * BTMath.singleton.Sqrt(-2 * BTMath.singleton.Log(RandomFloat())) * BTMath.singleton.Cos(2 * BTMath.singleton.PI * RandomFloat()) * stdev + mean;
-        }
-
-        public override bool RandomBool()
-        {
-            return (RandomRange(0, 1) == 1) ? true : false;
-        }
-
-        public override float RandomFloat()
-        {
-            return UnityEngine.Random.Range(0f, 1f);
-        }
-
-        public override int RandomRange(int min, int max)
-        {
-            return UnityEngine.Random.Range(min, max + 1);
-        }
-
-        public override float RandomRange(float min, float max)
-        {
-            return UnityEngine.Random.Range(min, max);
-        }
-    }
-
-    public class ConsoleRandomizer : Randomizer
-    {
-        System.Random rand;
-
-        public ConsoleRandomizer()
-        {
-            rand = new System.Random();
-        }
-
-        public override float Gaussian(float mean, float stdev)
-        {
-            // SQRT( -2*LN(RAND()) ) * COS( 2*PI()*RAND() ) * StdDev + Mean
-
-            return (float)(
-                Math.Sqrt(-2 * Math.Log(rand.NextDouble())) * Math.Cos(2 * Math.PI * rand.NextDouble()) * stdev + mean
-            );
-        }
-
-        public override float SignedGaussian(float mean, float stdev)
-        {
-            // SQRT( -2*LN(RAND()) ) * COS( 2*PI()*RAND() ) * StdDev + Mean
-
-            return (float)(
-                (RandomRange(0, 1) * 2 - 1) * Math.Sqrt(-2 * Math.Log(rand.NextDouble())) * Math.Cos(2 * Math.PI * rand.NextDouble()) * stdev + mean
-            );
-        }
-
-        public override int RandomRange(int min, int max)
-        {
-            return rand.Next(min, max + 1);
-        }
-
-        public override float RandomRange(float min, float max)
-        {
-            return (float)(min + (max - min) * rand.NextDouble());
-        }
-
-        public override float RandomFloat()
-        {
-            return (float)rand.NextDouble();
-        }
-
-        public override bool RandomBool()
-        {
-            return RandomRange(0, 1) == 1 ? true : false;
-        }
-    }
-
-    #endregion
-
-    #region Math
-
-    public interface BTMath
-    {
-        static BTMath _singleton;
-        public static BTMath singleton
-        {
-            get
-            {
-                if (_singleton == null)
-                    _singleton = new UnityMath();
-
-                return _singleton;
-            }
-            set => _singleton = value;
-        }
-
-        public abstract float PI { get; }
-
-        public abstract float Pow(float value, float power);
-
-        public abstract float Exp(float power);
-
-        public abstract float Sqrt(float power);
-
-        public abstract float Log(float power);
-
-        public abstract float Log(float power, float baseNum);
-
-        public abstract float Cos(float angle);
-
-        public abstract float Sin(float angle);
-    }
-
-    public class UnityMath : BTMath
-    {
-        public float PI => Mathf.PI;
-
-        public float Pow(float value, float power) => Mathf.Pow(value, power);
-
-        public float Exp(float power) => Mathf.Exp(power);
-
-        public float Sqrt(float power) => Mathf.Sqrt(power);
-
-        public float Log(float power) => Mathf.Log(power);
-
-        public float Log(float power, float baseNum) => Mathf.Log(power, baseNum);
-
-        public float Cos(float angle) => Mathf.Cos(angle * Mathf.Deg2Rad);
-
-        public float Sin(float angle) => Mathf.Sin(angle * Mathf.Deg2Rad);
-    }
-
-    public class ConsoleMath : BTMath
-    {
-        public float PI => (float)Math.PI;
-
-        public float Pow(float value, float power) => (float)Math.Pow(value, power);
-
-        public float Exp(float power) => (float)Math.Exp(power);
-
-        public float Sqrt(float power) => (float)Math.Sqrt(power);
-
-        public float Log(float power) => (float)Math.Log(power);
-
-        public float Log(float power, float baseNum) => (float)Math.Log(power, baseNum);
-
-        public float Cos(float angle) => (float)Math.Cos(angle * (Math.PI / 180));
-
-        public float Sin(float angle) => (float)Math.Sin(angle * (Math.PI / 180));
-    }
-
-    #endregion
-
-    public interface ICustomSerializable
-    {
-        string ToJson();
-
-        T FromJson<T>(string json);
-    }
-
-    public interface IDeepClonable<T>
-    {
-        T DeepClone();
     }
 }
