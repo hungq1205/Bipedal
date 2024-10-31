@@ -696,7 +696,7 @@ MonoBehaviour:
   scoreUI: {fileID: 5745369157539801712}
   learningRate: 0.01
   actionFreq: 2
-  legSpeed: 150
+  legSpeed: 40
   deterministic: 0
 --- !u!1 &8021568582236070413
 GameObject:

@@ -965,6 +965,11 @@ namespace BTLib
                 this.func = func;
             }
 
+            public override float[] Forward(float[] x)
+            {
+                return ForwardActivation(func, x);
+            }
+
             public override float ForwardComp(float x)
             {
                 return ForwardActivation(func, x);
@@ -1110,13 +1115,15 @@ namespace BTLib
                             result[i] = MathF.Exp(X[i]);
                         break;
                     case ActivationFunc.Softmax:
+                        UnityEngine.Debug.Log(string.Join(", ", X));
                         float temp = 0;
                         for (int i = 0; i < X.Length; i++)
                         {
                             result[i] = MathF.Exp(X[i]);
                             temp += result[i];
                         }
-                        temp = 1 / temp;
+                        temp = 1f / temp;
+                        UnityEngine.Debug.Log(temp);
                         for (int i = 0; i < X.Length; i++)
                             result[i] *= temp;
                         break;
@@ -1198,8 +1205,7 @@ namespace BTLib
                     result[i] = new float[dim];
 
                 for (int i = 0; i < inputs.Length; i++)
-                    for (int j = 0; j < dim; j++)
-                        result[i][j] = ForwardComp(inputs[i][j] + GetBias(j));
+                    result[i] = Forward(result[i]);
 
                 return result;
             }

@@ -7,6 +7,8 @@ using BTLib.AI.RL;
 
 public class Humon : UnityAgent
 {
+    const float angleNormalizer = 1 / 90f;
+
     public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg;
     public TextMeshProUGUI scoreUI;
 
@@ -61,19 +63,19 @@ public class Humon : UnityAgent
     {
         Optimizer opt = new Adam(learningRate: learningRate);
 
-        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(5);
+        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(8);
         builder.NewLayers(
             new ActivationLayer(32, ActivationFunc.ReLU),
             new ActivationLayer(32, ActivationFunc.ReLU),
             new ActivationLayer(32, ActivationFunc.ReLU),
-            new ActivationLayer(4, ActivationFunc.ReLU)
+            new ActivationLayer(4, ActivationFunc.Softmax)
         );
 
         var policy = new DenseNeuralNetwork(builder, opt);
         policy.BiasAssignForEach((b, dim) => 0f);
         policy.WeightAssignForEach((w, inDim, outDim) =>
         {
-            float stddev = Mathf.Sqrt(2f / (inDim + outDim));
+            float stddev = Mathf.Sqrt(6f / (inDim));
             return UnityEngine.Random.Range(-stddev, stddev);
         });
 
@@ -129,7 +131,9 @@ public class Humon : UnityAgent
         transform.localPosition = pos;
     }
 
-    public float GetPartSignedAngle(Rigidbody2D rb) => Vector2.SignedAngle(Vector2.up, rb.transform.up);
+    public float GetPartSignedAngle(Rigidbody2D rb) => Vector2.SignedAngle(Vector2.up, rb.transform.up) * angleNormalizer + 1f;
+
+    public float GetPartAngularVelocity(Rigidbody2D rb) => rb.angularVelocity * angleNormalizer;
 
     public void AddSpin(float value, Rigidbody2D rb)
     {
@@ -166,23 +170,27 @@ public class Humon : UnityAgent
 
     public override void TakeAction()
     {
-        if (prevAction != -1)
-            Policy.Update(PolicyOpt.ComputeLoss(prevObs, prevAction, 1f));
+        //if (prevAction != -1)
+        //    Policy.Update(PolicyOpt.ComputeLoss(prevObs, prevAction, 1f));
 
         float[] obs = new[] {
             GetPartSignedAngle(l_LowerLeg),
             GetPartSignedAngle(l_UpperLeg),
             GetPartSignedAngle(r_LowerLeg),
             GetPartSignedAngle(r_UpperLeg),
-            GetPos().y
+            GetPartAngularVelocity(l_LowerLeg),
+            GetPartAngularVelocity(l_UpperLeg),
+            GetPartAngularVelocity(r_LowerLeg),
+            GetPartAngularVelocity(r_UpperLeg)
         };
         prevObs ??= new float[obs.Length];
         for (int i = 0; i < obs.Length; i++)
             prevObs[i] = obs[i];
 
+        Debug.Log("----------------------");
+        Debug.Log(string.Join(", ", obs));
         var outputs = Policy.Forward(obs);
-        string s = string.Join(", ", obs);
-        Debug.Log(s);
+        Debug.Log(string.Join(", ", outputs));
 
         int action = -1;
         if (deterministic)
