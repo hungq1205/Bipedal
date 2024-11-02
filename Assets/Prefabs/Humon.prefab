@@ -538,7 +538,7 @@ HingeJoint2D:
     m_MaximumMotorForce: 10000
   m_UseLimits: 1
   m_AngleLimits:
-    m_LowerAngle: 0
+    m_LowerAngle: -90
     m_UpperAngle: 90
 --- !u!1 &7982236604926397819
 GameObject:
@@ -695,7 +695,10 @@ MonoBehaviour:
   r_UpperLeg: {fileID: 8859175142351151630}
   scoreUI: {fileID: 5745369157539801712}
   learningRate: 0.01
-  actionFreq: 2
+  discountFactor: 0.95
+  explorationRate: 1
+  explorationDecay: 0.999
+  actionFreq: 4
   legSpeed: 40
   deterministic: 0
 --- !u!1 &8021568582236070413
@@ -854,7 +857,7 @@ HingeJoint2D:
     m_MaximumMotorForce: 10000
   m_UseLimits: 1
   m_AngleLimits:
-    m_LowerAngle: -90
+    m_LowerAngle: -180
     m_UpperAngle: 0
 --- !u!1 &8021568582643831194
 GameObject:

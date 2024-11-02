@@ -25,9 +25,14 @@ public class WalkingEnv : UnityEnvironment
     public override float Evaluate(IAgent agent)
     {
         var uAgent = (UnityAgent)agent;
-        float score = uAgent.GetPos().x + 20;
-        if (uAgent.IsKilled)
-            score *= 0.5f;
+        float score = (uAgent.GetPos().x + 10) * 2;
+        if (uAgent.ConcludedType == ConcludeType.Killed)
+        {
+            if (score > 20)
+                score *= 0.5f;
+            else
+                score -= 10f;
+        }
         return score;
     }
 
@@ -45,7 +50,7 @@ public class WalkingEnv : UnityEnvironment
 
     public override void ResetStates()
     {
-
+        timer = timeoutSec;
     }
 
     public UnityAgent SpawnAgent()
@@ -66,7 +71,10 @@ public class WalkingEnv : UnityEnvironment
         {
             timer = timeoutSec;
             foreach (var agent in uAgents)
+            {
+                agent.Conclude(ConcludeType.Terminate);
                 agent.ResetStates();
+            }
             ResetStates();
         }
     }

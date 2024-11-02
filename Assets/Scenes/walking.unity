@@ -782,7 +782,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d0ec2cc17d57cc148ac3aad01b971782, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  timeoutSec: 15
+  timeoutSec: 5
   timerUI: {fileID: 1586936692}
   agentPrefab: {fileID: 8021568582228826117, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
   spawner: {fileID: 979375332}

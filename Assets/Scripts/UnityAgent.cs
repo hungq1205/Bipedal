@@ -8,9 +8,9 @@ public abstract class UnityAgent : MonoBehaviour, IAgent
     public IEnvironment Env { get; set; }
     public IPolicy Policy { get; protected set; }
     public IPolicyOptimization PolicyOpt { get; protected set; }
-    public bool IsKilled { get; protected set; }
+    public ConcludeType ConcludedType { get; protected set; } = ConcludeType.None;
 
-    public abstract void Kill();
+    public abstract void Conclude(ConcludeType type);
 
     public abstract void Hide(bool value);
 

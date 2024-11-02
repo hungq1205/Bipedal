@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System;
 using System.Linq;
+using UnityEditor.PackageManager.UI;
 
 namespace BTLib
 {
@@ -201,7 +202,7 @@ namespace BTLib
 
         }
 
-        public class DenseNeuralNetworkBuilder : INeuralNetworkBuilder
+        public class DenseNeuralNetworkBuilder : INeuralNetworkBuilder, IDisposable
         {
             public List<Layer> layers;
 
@@ -812,15 +813,10 @@ namespace BTLib
                     variance /= sampleSize;
 
                     for (int sample = 0; sample < result.Length; sample++)
-                        result[sample][i] = ForwardComp(Standardize(inputs[sample][i], mean, variance));
+                        result[sample][i] = Standardize(inputs[sample][i], mean, variance) * gamma + beta;
                 }
 
                 return result;
-            }
-
-            public override float ForwardComp(float x)
-            {
-                return base.ForwardComp(x * gamma + beta);
             }
 
             public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
@@ -906,9 +902,12 @@ namespace BTLib
 
             public override void GradientDescent(ref float[][] errors, ForwardResult result, Optimizer optimizer) { }
 
-            public override float ForwardComp(float x)
+            public override float[] Forward(float[] X)
             {
-                return base.ForwardComp(x * gamma + beta);
+                float[] rs = new float[X.Length];
+                for (int i = 0; i < X.Length; i++)
+                    rs[i] = (X[i] + GetBias(i)) * gamma + beta;
+                return rs;
             }
         }
 
@@ -970,56 +969,42 @@ namespace BTLib
                 return ForwardActivation(func, x);
             }
 
-            public override float ForwardComp(float x)
+            public override float[] FunctionDifferential(float[] X, float[] loss)
             {
-                return ForwardActivation(func, x);
+                return ActivationDifferential(func, X, loss);
             }
 
-            public override float[] FunctionDifferential(float[] X, IEnumerator<float> offsets)
+            public override float FunctionDifferential(float x, float loss, float offset = 0)
             {
-                float[] temp = new float[X.Length];
-                for (int i = 0; i < X.Length; i++, offsets.MoveNext())
-                    temp[i] += offsets.Current;
-
-                return ActivationDifferential(func, temp);
+                return ActivationDifferential(func, x + offset, loss);
             }
 
-            public override float[] FunctionDifferential(float[] X)
-            {
-                return ActivationDifferential(func, X);
-            }
-
-            public override float FunctionDifferential(float x, float offset = 0)
-            {
-                return ActivationDifferential(func, x + offset);
-            }
-
-            public static float ActivationDifferential(ActivationFunc func, float x)
+            public static float ActivationDifferential(ActivationFunc func, float x, float loss)
             {
                 switch (func)
                 {
                     case ActivationFunc.Sigmoid:
                         float sigmoid = ForwardActivation(func, x);
-                        return sigmoid * (1 - sigmoid);
+                        return sigmoid * (1 - sigmoid) * loss;
                     case ActivationFunc.Tanh:
-                        float sqrExp = MathF.Exp(x);
+                        float sqrExp = MathF.Exp(x) * loss;
                         sqrExp *= sqrExp;
-                        return 4 / (sqrExp + (1 / sqrExp) + 2);
+                        return 4 * loss / (sqrExp + (1 / sqrExp) + 2);
                     case ActivationFunc.ReLU:
-                        return (x > 0) ? 1 : 0;
+                        return (x > 0) ? loss : 0;
                     case ActivationFunc.NaturalLog:
-                        return 1 / x;
+                        return loss / x;
                     case ActivationFunc.Exponential:
-                        return MathF.Exp(x);
+                        return MathF.Exp(x) * loss;
                     case ActivationFunc.Softmax:
                         return 0;
                     case ActivationFunc.Linear:
                     default:
-                        return 1;
+                        return loss;
                 }
             }
 
-            public static float[] ActivationDifferential(ActivationFunc func, float[] X)
+            public static float[] ActivationDifferential(ActivationFunc func, float[] X, float[] loss)
             {
                 float[] result = new float[X.Length];
                 switch (func)
@@ -1028,7 +1013,7 @@ namespace BTLib
                         for (int i = 0; i < X.Length; i++)
                         {
                             float sigmoid = ForwardActivation(func, X[i]);
-                            result[i] = sigmoid * (1 - sigmoid);
+                            result[i] = sigmoid * (1 - sigmoid) * loss[i];
                         }
                         break;
                     case ActivationFunc.Tanh:
@@ -1036,31 +1021,31 @@ namespace BTLib
                         {
                             float sqrExp = MathF.Exp(X[i]);
                             sqrExp *= sqrExp;
-                            result[i] = 4 / (sqrExp + (1 / sqrExp) + 2);
+                            result[i] = 4 * loss[i] / (sqrExp + (1 / sqrExp) + 2);
                         }
                         break;
                     case ActivationFunc.ReLU:
                         for (int i = 0; i < X.Length; i++)
-                            result[i] = (X[i] > 0) ? 1 : 0;
+                            result[i] = (X[i] > 0) ? loss[i] : 0;
                         break;
                     case ActivationFunc.NaturalLog:
                         for (int i = 0; i < X.Length; i++)
-                            result[i] = 1 / X[i];
+                            result[i] = loss[i] / X[i];
                         break;
                     case ActivationFunc.Exponential:
                         for (int i = 0; i < X.Length; i++)
-                            result[i] = MathF.Exp(X[i]);
+                            result[i] = MathF.Exp(X[i]) * loss[i];
                         break;
                     case ActivationFunc.Softmax:
                         float[] softmax = ForwardActivation(func, X);
                         for (int i = 0; i < X.Length; i++)
                             for (int j = 0; j < X.Length; j++)
-                                result[i] += (i == j) ? softmax[i] * (1 - softmax[i]) : -softmax[i] * softmax[j];
+                                result[i] += (i == j) ? softmax[i] * (1 - softmax[i]) * loss[j] : -softmax[i] * softmax[j] * loss[j];
                         break;
                     case ActivationFunc.Linear:
                     default:
                         for (int i = 0; i < X.Length; i++)
-                            result[i] = 1;
+                            result[i] = loss[i];
                         break;
                 }
 
@@ -1115,7 +1100,6 @@ namespace BTLib
                             result[i] = MathF.Exp(X[i]);
                         break;
                     case ActivationFunc.Softmax:
-                        UnityEngine.Debug.Log(string.Join(", ", X));
                         float temp = 0;
                         for (int i = 0; i < X.Length; i++)
                         {
@@ -1123,7 +1107,6 @@ namespace BTLib
                             temp += result[i];
                         }
                         temp = 1f / temp;
-                        UnityEngine.Debug.Log(temp);
                         for (int i = 0; i < X.Length; i++)
                             result[i] *= temp;
                         break;
@@ -1186,14 +1169,11 @@ namespace BTLib
 
                 for (int sample = 0; sample < errors.Length; sample++)
                 {
-                    float[] df = FunctionDifferential(log.layerInputs[layerIndex][sample], Enumerable.Range(0, dim).Select(GetBias).GetEnumerator());
+                    errors[sample] = FunctionDifferential(log.layerInputs[layerIndex][sample], errors[sample]);
 
                     // bias update
-                    for (int i = 0; i < dim; i++)
-                    {
-                        errors[sample][i] *= df[i];
-                        SetBias(i, optimizer.BiasUpdate(layerIndex, i, errors[sample][i]));
-                    }
+                    //for (int i = 0; i < dim; i++)
+                    //    SetBias(i, optimizer.BiasUpdate(layerIndex, i, errors[sample][i]));
                 }
             }
 
@@ -1215,41 +1195,26 @@ namespace BTLib
                 float[] result = new float[dim];
 
                 for (int i = 0; i < dim; i++)
-                    result[i] = ForwardComp(inputs[i] + GetBias(i));
+                    result[i] = inputs[i] + GetBias(i);
 
                 return result;
             }
-
-            public virtual float ForwardComp(float x) => x;
 
             /// <summary>
             /// Will be called indirectly through <b>FunctionDifferential(float[] X)</b> if wasn't overridden
             /// </summary>
             /// <returns> Return <b>df(bias, x) / dx</b></returns>
-            public virtual float FunctionDifferential(float x, float offset = 0) => 1 + offset;
+            public virtual float FunctionDifferential(float x, float loss, float offset = 0f) => loss;
 
             /// <summary>
             /// Will be called directly in the <b>GradientDescent</b> method
             /// </summary>
             /// <returns> Return <b>df(bias, x) / dx</b> for each x in X </returns>
-            public virtual float[] FunctionDifferential(float[] X)
+            public virtual float[] FunctionDifferential(float[] X, float[] loss)
             {
                 float[] result = new float[X.Length];
                 for (int i = 0; i < X.Length; i++)
-                    result[i] = X[i];
-
-                return result;
-            }
-
-            /// <summary>
-            /// Will be called directly in the <b>GradientDescent</b> method
-            /// </summary>
-            /// <returns> Return <b>df(bias, x) / dx</b> for each x in X </returns>
-            public virtual float[] FunctionDifferential(float[] X, IEnumerator<float> offsets)
-            {
-                float[] result = new float[X.Length];
-                for (int i = 0; i < X.Length; i++, offsets.MoveNext())
-                    result[i] = X[i] + offsets.Current;
+                    result[i] = loss[i];
 
                 return result;
             }
@@ -1350,18 +1315,21 @@ namespace BTLib
             {
                 if (!useWeights) return;
 
-                for (int i = 0; i < matrix.Length; i++)
+                float[] weightErrorSum = new float[matrix.Length];
+                for (int sample = 0; sample < errors.Length; sample++)
                 {
-                    float weightErrorSum = 0;
+                    float[] layerForward = network.Layers[weightsIndex].Forward(log.layerInputs[weightsIndex][sample]);
+                    float[] layerDif = network.Layers[weightsIndex].FunctionDifferential(log.layerInputs[weightsIndex][sample], errors[sample]);
 
-                    for (int sample = 0; sample < errors.Length; sample++)
+                    for (int i = 0; i < matrix.Length; i++)
                     {
-                        weightErrorSum += errors[sample][i] * network.Layers[weightsIndex].ForwardComp(log.layerInputs[weightsIndex][sample][i] + network.Layers[weightsIndex].GetBias(i));
-                        errors[sample][i] *= matrix[i] * network.Layers[weightsIndex].FunctionDifferential(log.layerInputs[weightsIndex][sample][i] + network.Layers[weightsIndex].GetBias(i));
+                        weightErrorSum[i] += errors[sample][i] * layerForward[i];
+                        errors[sample][i] = matrix[i] * layerDif[i];
                     }
-
-                    matrix[i] = optimizer.WeightUpdate(weightsIndex, i, i, weightErrorSum);
                 }
+
+                for (int i = 0; i < matrix.Length; i++)
+                    matrix[i] = optimizer.WeightUpdate(weightsIndex, i, i, weightErrorSum[i]);
             }
 
             public override float[] Forward(float[] inputs)
@@ -1464,19 +1432,27 @@ namespace BTLib
                 for (int i = 0; i < errors.Length; i++)
                     weightErrors[i] = new float[inDim];
 
+                float[][] weightErrorSum = new float[outDim][];
                 for (int i = 0; i < outDim; i++)
-                    for (int j = 0; j < inDim; j++)
-                    {
-                        float weightErrorSum = 0;
+                    weightErrorSum[i] = new float[inDim];
 
-                        for (int sample = 0; sample < errors.Length; sample++)
+                for (int sample = 0; sample < errors.Length; sample++)
+                {
+                    float[] layerForward = prevLayer.Forward(log.layerInputs[weightsIndex][sample]);
+
+                    for (int i = 0; i < outDim; i++)
+                        for (int j = 0; j < inDim; j++)
                         {
-                            weightErrorSum += errors[sample][i] * prevLayer.ForwardComp(log.layerInputs[weightsIndex][sample][j] + prevLayer.GetBias(j));
-                            weightErrors[sample][j] += errors[sample][i] * matrix[i, j] * prevLayer.FunctionDifferential(log.layerInputs[weightsIndex][sample][j] + prevLayer.GetBias(j));
+                            weightErrorSum[i][j] += errors[sample][i] * layerForward[j];
+                            weightErrors[sample][j] += errors[sample][i] * matrix[i, j];
                         }
 
-                        matrix[i, j] = optimizer.WeightUpdate(weightsIndex, j, i, weightErrorSum);
-                    }
+                    weightErrors[sample] = prevLayer.FunctionDifferential(log.layerInputs[weightsIndex][sample], weightErrors[sample]);
+                }
+
+                for (int i = 0; i < outDim; i++)
+                    for (int j = 0; j < inDim; j++)
+                        matrix[i, j] = optimizer.WeightUpdate(weightsIndex, j, i, weightErrorSum[i][j]);
 
                 errors = weightErrors;
             }
@@ -1543,6 +1519,13 @@ namespace BTLib
 
         namespace RL
         {
+            public enum ConcludeType
+            {
+                None,
+                Terminate,
+                Killed,
+            }
+
             public interface IEnvironment
             {
                 IEnumerable<IAgent> Agents { get; }
@@ -1571,6 +1554,8 @@ namespace BTLib
                 /// <returns><b>Observation</b> as float[] and <b>reward</b> as float</returns>
                 void TakeAction();
 
+                void Conclude(ConcludeType type);
+
             }
 
             public interface IPolicy
@@ -1598,11 +1583,11 @@ namespace BTLib
                 float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false);
             }
 
-            public class PolicyGradient : IPolicyOptimization
+            public class Reinforce : IPolicyOptimization
             {
                 public IPolicy Policy { get; private set; }
 
-                public PolicyGradient(IPolicy policy)
+                public Reinforce(IPolicy policy)
                 {
                     Policy = policy;
                 }
@@ -1618,10 +1603,42 @@ namespace BTLib
                         outputs = ActivationLayer.ForwardActivation(ActivationFunc.Softmax, Policy.Forward(obs));
 
                     for (int i = 0; i < outputs.Length; i++)
-                        outputs[i] = MathF.Log(outputs[action]) * mass;
+                    {
+                        outputs[i] = i == action ? -(1 / outputs[i]) * mass : 0;
+                    }
 
                     return outputs;
                 }
+            }
+
+            public class ExplorationWrapper : IPolicyOptimization
+            {
+                public IPolicyOptimization content;
+                public float exploreRate, exploreDecay;
+
+                public IPolicy Policy => content.Policy;
+
+                public ExplorationWrapper(IPolicyOptimization content, float initialRate, float decay)
+                {
+                    this.content = content;
+                    exploreRate = initialRate;
+                    exploreDecay = decay;
+                }
+
+                public int GetAction(float[] actProbs)
+                {
+                    int act = -1;
+                    Random rand = new();
+                    if (rand.NextDouble() > exploreRate)
+                        act = content.GetAction(actProbs);
+                    else
+                        act = rand.Next(actProbs.Length);
+                    exploreRate *= exploreDecay;
+                    return act;
+                }
+
+                public float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false)
+                    => content.ComputeLoss(obs, action, mass, logits);
             }
         }
     }
