@@ -1,12 +1,14 @@
 using TMPro;
-using BTLib.AI.RL;
+using Lib.AI.RL;
 using UnityEngine;
 using System;
+using UnityEngine.SocialPlatforms.Impl;
 
 public class WalkingEnv : UnityEnvironment
 {
     public float startingX { get; private set; } = 0.4082f;
     public float timeoutSec = 10f;
+    public UnityAgent agent;
 
     public TextMeshProUGUI timerUI;
     public GameObject agentPrefab;
@@ -19,14 +21,25 @@ public class WalkingEnv : UnityEnvironment
     {
         cam = FindObjectOfType<CameraFollow>();
         timer = timeoutSec;
-        uAgents.Add(SpawnAgent());
+        if (agent == null)
+            uAgents.Add(SpawnAgent());
+        else
+        {
+            agent.Env = this;
+            uAgents.Add(agent);
+        }
     }
 
-    public override float Evaluate(IAgent agent)
+    public override float Evaluate(IAgent agent, IEnvironment.Record rec)
     {
-        var uAgent = (UnityAgent)agent;
-        float score = (uAgent.GetPos().x + 10) * 2;
-        if (uAgent.ConcludedType == ConcludeType.Killed)
+        var wrec = (WalkingRecord)rec;
+        float score = (wrec.x + 10) * 2;
+        if (wrec.centerDif < 1.6f)
+            wrec.centerDif = 0;
+        if (wrec.xPosStaticElapsed < 1f)
+            wrec.xPosStaticElapsed = 0;
+        score -= wrec.lyingElapsed * (wrec.y * wrec.y + 3f) + wrec.highLegElapsed * 9f + wrec.centerDif * 1f;
+        if (agent.ConcludedType == ConcludeType.Killed)
         {
             if (score > 20)
                 score *= 0.5f;
@@ -55,8 +68,8 @@ public class WalkingEnv : UnityEnvironment
 
     public UnityAgent SpawnAgent()
     {
-        UnityAgent agent = GameObject.Instantiate(agentPrefab, spawner).GetComponent<UnityAgent>();
-        agent.Env = this;
+        UnityAgent ag = GameObject.Instantiate(agentPrefab, spawner).GetComponent<UnityAgent>();
+        ag.Env = this;
         ResetAgent(agent);
 
         return agent;
@@ -76,6 +89,25 @@ public class WalkingEnv : UnityEnvironment
                 agent.ResetStates();
             }
             ResetStates();
+        }
+    }
+
+    public class WalkingRecord : IEnvironment.Record
+    {
+        public float x, y;
+        public float xPosStaticElapsed;
+        public float lyingElapsed;
+        public float highLegElapsed;
+        public float centerDif;
+
+        public WalkingRecord(Vector2 pos, float xPosStaticElapsed, float lyingElapsed, float highLegElapsed, float centerDif)
+        {
+            x = pos.x;
+            y = pos.y;
+            this.xPosStaticElapsed = xPosStaticElapsed;
+            this.lyingElapsed = lyingElapsed;
+            this.highLegElapsed = highLegElapsed;
+            this.centerDif = centerDif;
         }
     }
 }

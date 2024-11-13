@@ -1,12 +1,15 @@
-﻿using BTLib.AI.RL;
-using BTLib.Utility;
+﻿using Lib.AI.RL;
 using System.Collections.Generic;
 using System.IO;
 using System;
 using System.Linq;
-using UnityEditor.PackageManager.UI;
+using System.Text;
+using System.Reflection;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
+using static Lib.Utility.Common;
 
-namespace BTLib
+namespace Lib
 {
     namespace AI
     {
@@ -68,6 +71,17 @@ namespace BTLib
             /// </summary>
             /// <param name="func">Takes current bias as parameter and returns a new bias</param>
             void BiasAssignForEach(Func<float, int, float> func);
+
+            void IPolicy.CloneTo(IPolicy policy)
+            {
+                var nn = (INeuralNetwork)policy;
+
+                for (int i = 0; i < Layers.Length; i++)
+                    Layers[i].CloneTo(nn.Layers[i]);
+
+                for (int i = 0; i < Weights.Length; i++)
+                    Weights[i].CloneTo(nn.Weights[i]);
+            }
         }
 
         public class DenseNeuralNetwork : INeuralNetwork
@@ -79,6 +93,30 @@ namespace BTLib
             public WeightMatrix[] Weights { get; private set; }
 
             public ForwardResult Log { get; set; }
+
+            public DenseNeuralNetwork() { }
+
+            private DenseNeuralNetwork(DenseNeuralNetwork source)
+            {
+                InDim = source.InDim;
+                OutDim = source.OutDim;
+
+                Layers = new Layer[source.Layers.Length];
+                for (int i = 0; i < source.Layers.Length; i++)
+                {
+                    Layers[i] = source.Layers[i].Clone();
+                    Layers[i].Build(this);
+                    source.Layers[i].CloneTo(Layers[i]);
+                }
+
+                Weights = new WeightMatrix[source.Weights.Length];
+                for (int i = 0; i < source.Weights.Length; i++)
+                {
+                    Weights[i] = source.Weights[i].Clone();
+                    Weights[i].Build(this);
+                    source.Weights[i].CloneTo(Weights[i]);
+                }
+            }
 
             public DenseNeuralNetwork(DenseNeuralNetworkBuilder builder, float learningRate, bool disposeAfterwards = true) : base()
             {
@@ -127,7 +165,7 @@ namespace BTLib
             public void WeightAssignForEach(Func<float, int, int, float> func)
             {
                 for (int i = 0; i < Weights.LongLength; i++)
-                    Weights[i].AssignForEach((inIndex, outIndex, weight) => func(weight, Weights[i].inDim, Weights[i].outDim));
+                    Weights[i].AssignForEach((inIndex, outIndex, weight) => func(weight, Weights[i].InDim, Weights[i].OutDim));
             }
 
             public void BiasAssignForEach(Func<float, int, float> func)
@@ -162,6 +200,11 @@ namespace BTLib
                 }
             }
 
+            public float[] Infer(float[] X)
+            {
+                return InferLayers(X, Layers.Length - 1, 0);
+            }
+
             public ForwardResult ForwardLog(float[] inputs)
             {
                 float[][][] layerInputs = new float[Layers.LongLength][][];
@@ -176,6 +219,13 @@ namespace BTLib
                 float[][] outputs = ForwardLayers(inputs, Layers.Length - 1, 0, ref layerInputs);
 
                 return new ForwardResult(layerInputs, outputs);
+            }
+
+            float[] InferLayers(float[] X, int toLayer, int fromLayer)
+            {
+                if (fromLayer < toLayer)
+                    X = Weights[toLayer - 1].Forward(InferLayers(X, toLayer - 1, fromLayer));
+                return Layers[toLayer].Forward(X);
             }
 
             float[] ForwardLayers(float[] inputs, int toLayer, int fromLayer, ref float[][][] layerInputs)
@@ -200,6 +250,65 @@ namespace BTLib
                 return Layers[toLayer].Forward(layerInputs[toLayer]);
             }
 
+            public IPolicy Clone()
+            {
+                return new DenseNeuralNetwork(this);
+            }
+
+            public void Save(string filepath)
+            {
+                using var fileStream = new StreamWriter(filepath);
+                using var writer = new JsonTextWriter(fileStream);
+
+                writer.WriteStartObject();
+                writer.WritePropertyName("Layers");
+                writer.WriteStartArray();
+
+                for (int i = 0; i < Layers.Length; i++)
+                    Layer.ToJson(writer, Layers[i]);
+
+                writer.WriteEndArray();
+                writer.WritePropertyName("Weights");
+                writer.WriteStartArray();
+
+                for (int i = 0; i < Weights.Length; i++)
+                    WeightMatrix.ToJson(writer, Weights[i]);
+
+                writer.WriteEndArray();
+                writer.WritePropertyName("Optimizer");
+                Optimizer.ToJson(writer, Optimizer);
+
+                writer.WriteEndObject();
+            }
+
+            public void Load(string filepath)
+            {
+                var jobject = JObject.Parse(File.ReadAllText(filepath));
+
+                var layers = new List<Layer>();
+                foreach (var layer in jobject["Layers"].Children())
+                    layers.Add(Layer.FromJson(layer.ToString()));
+
+                var weights = new List<WeightMatrix>();
+                foreach (var weight in jobject["Weights"].Children())
+                    weights.Add(WeightMatrix.FromJson(weight.ToString()));
+
+                Optimizer = Optimizer.FromJson(jobject["Optimizer"].ToString());
+
+                Layers = layers.ToArray();
+                Weights = weights.ToArray();
+
+                InDim = Layers[0].dim;
+                OutDim = Layers[Layers.LongLength - 1].dim;
+
+                foreach (var layer in Layers)
+                    layer.Build(this);
+
+                foreach (var weight in Weights)
+                    weight.Build(this);
+
+                Optimizer.Init(this);
+            }
         }
 
         public class DenseNeuralNetworkBuilder : INeuralNetworkBuilder, IDisposable
@@ -210,7 +319,7 @@ namespace BTLib
             {
                 layers = new List<Layer>();
 
-                layers.Add(new Layer(inputDim, false));
+                layers.Add(new Layer(inputDim, true));
             }
 
             public void NewLayers(params Layer[] dims)
@@ -266,8 +375,10 @@ namespace BTLib
             public float BetaUpdate(int layerIndex, float gradient);
         }
 
-        public abstract class Optimizer
+        public abstract class Optimizer : IJsonConvertable
         {
+            readonly static Dictionary<string, Type> types = GetChildrenTypeOf<Optimizer>();
+
             public DenseNeuralNetwork network;
             public float weightDecay;
 
@@ -284,6 +395,14 @@ namespace BTLib
             public abstract float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient);
 
             public abstract float BiasUpdate(int layerIndex, int perceptron, float gradient);
+
+            public abstract IEnumerable<(string, object)> GetJsonProperties();
+
+            public static void ToJson(JsonWriter writer, Optimizer opt)
+                => StoreJson(writer, opt);
+
+            public static Optimizer FromJson(string json)
+                => (Optimizer)LoadJson(json, types);
         }
 
         public class SGD : Optimizer, IBatchNormOptimizable
@@ -291,6 +410,7 @@ namespace BTLib
             public float learningRate;
             public Dictionary<int, int> bnIndexLookup { get; private set; }
 
+            [JsonConstructor]
             public SGD(float learningRate, float weightDecay = 0) : base(weightDecay)
             {
                 this.learningRate = learningRate;
@@ -320,6 +440,12 @@ namespace BTLib
             {
                 return ((BatchNormLayer)network.Layers[layerIndex]).beta - gradient * learningRate;
             }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("learningRate", learningRate);
+                yield return ("weightDecay", weightDecay);
+            }
         }
 
         public class Momentum : Optimizer, IBatchNormOptimizable
@@ -337,37 +463,52 @@ namespace BTLib
                 this.beta = beta;
             }
 
+            [JsonConstructor]
+            private Momentum(float[][][] weightMomentum, float[][] biasMomentum, float beta = 0.9f, float learningRate = 0.01f, float weightDecay = 0) : base(weightDecay)
+            {
+                this.learningRate = learningRate;
+                this.beta = beta;
+                this.weightMomentum = weightMomentum;
+                this.biasMomentum = biasMomentum;
+            }
+
             public override void Init(DenseNeuralNetwork network)
             {
                 this.network = network;
 
-                weightMomentum = new float[network.Weights.Length][][];
-                for (int i = 0; i < network.Weights.Length; i++)
+                if (weightMomentum == null)
                 {
-                    weightMomentum[i] = new float[network.Weights[i].outDim][];
-                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    weightMomentum = new float[network.Weights.Length][][];
+                    for (int i = 0; i < network.Weights.Length; i++)
                     {
-                        weightMomentum[i][j] = new float[network.Weights[i].inDim];
-                        for (int k = 0; k < network.Weights[i].inDim; k++)
-                            weightMomentum[i][j][k] = 0.000001f; // epsilon = 10^-6
+                        weightMomentum[i] = new float[network.Weights[i].OutDim][];
+                        for (int j = 0; j < network.Weights[i].OutDim; j++)
+                        {
+                            weightMomentum[i][j] = new float[network.Weights[i].InDim];
+                            for (int k = 0; k < network.Weights[i].InDim; k++)
+                                weightMomentum[i][j][k] = 0.000001f; // epsilon = 10^-6
+                        }
                     }
                 }
 
-                bnIndexLookup = new Dictionary<int, int>();
+                bnIndexLookup ??= new Dictionary<int, int>();
 
-                biasMomentum = new float[network.Layers.Length][];
-                for (int i = 0; i < network.Layers.Length; i++)
+                if (biasMomentum == null)
                 {
-                    biasMomentum[i] = new float[network.Layers[i].dim];
-                    for (int j = 0; j < network.Layers[i].dim; j++)
-                        biasMomentum[i][j] = 0.000001f; // epsilon = 10^-6
+                    biasMomentum = new float[network.Layers.Length][];
+                    for (int i = 0; i < network.Layers.Length; i++)
+                    {
+                        biasMomentum[i] = new float[network.Layers[i].dim];
+                        for (int j = 0; j < network.Layers[i].dim; j++)
+                            biasMomentum[i][j] = 0.000001f; // epsilon = 10^-6
 
-                    if (network.Layers[i] is BatchNormLayer)
-                        bnIndexLookup.Add(i, bnIndexLookup.Count);
-                }
+                        if (network.Layers[i] is BatchNormLayer)
+                            bnIndexLookup.Add(i, bnIndexLookup.Count);
+                    }
+                }    
 
-                gammaMomentum = new float[bnIndexLookup.Count];
-                betaMomentum = new float[bnIndexLookup.Count];
+                gammaMomentum ??= new float[bnIndexLookup.Count];
+                betaMomentum ??= new float[bnIndexLookup.Count];
             }
 
             public override float WeightUpdate(int weightsIndex, int inIndex, int outIndex, float gradient)
@@ -399,6 +540,15 @@ namespace BTLib
 
                 return ((BatchNormLayer)network.Layers[layerIndex]).beta - learningRate * betaMomentum[bnIndexLookup[layerIndex]];
             }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("weightMomentum", weightMomentum);
+                yield return ("biasMomentum", biasMomentum);
+                yield return ("beta", beta);
+                yield return ("learningRate", learningRate);
+                yield return ("weightDecay", weightDecay);
+            }
         }
 
         public class RMSprop : Optimizer, IBatchNormOptimizable
@@ -423,11 +573,11 @@ namespace BTLib
                 accumWeightGrad = new float[network.Weights.Length][][];
                 for (int i = 0; i < network.Weights.Length; i++)
                 {
-                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
-                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    accumWeightGrad[i] = new float[network.Weights[i].OutDim][];
+                    for (int j = 0; j < network.Weights[i].OutDim; j++)
                     {
-                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
-                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                        accumWeightGrad[i][j] = new float[network.Weights[i].InDim];
+                        for (int k = 0; k < network.Weights[i].InDim; k++)
                             accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
                     }
                 }
@@ -478,22 +628,29 @@ namespace BTLib
 
                 return ((BatchNormLayer)network.Layers[layerIndex]).beta - (learningRate * gradient / MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]]));
             }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("learningRate", learningRate);
+                yield return ("weightDecay", weightDecay);
+            }
         }
 
         public class Adam : Optimizer, IBatchNormOptimizable
         {
             public float[][][] accumWeightGrad, weightMomentum;
             public float[][] accumBiasGrad, biasMomentum;
-            public float learningRate, beta1, beta2;
+            public float learningRate, beta1, beta2, epsilon;
 
             public Dictionary<int, int> bnIndexLookup { get; private set; }
             public float[] accumGammaGrad, gammaMomentum, accumBetaGrad, betaMomentum;
 
-            public Adam(float beta1 = 0.9f, float beta2 = 0.99f, float learningRate = 0.01f, float weightDecay = 0) : base(weightDecay)
+            public Adam(float beta1 = 0.9f, float beta2 = 0.99f, float learningRate = 0.01f, float weightDecay = 0, float epsilon = 1e-2f) : base(weightDecay)
             {
                 this.learningRate = learningRate;
                 this.beta1 = beta1;
                 this.beta2 = beta2;
+                this.epsilon = epsilon;
             }
 
             public override void Init(DenseNeuralNetwork network)
@@ -504,16 +661,16 @@ namespace BTLib
                 accumWeightGrad = new float[network.Weights.Length][][];
                 for (int i = 0; i < network.Weights.Length; i++)
                 {
-                    weightMomentum[i] = new float[network.Weights[i].outDim][];
-                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
-                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    weightMomentum[i] = new float[network.Weights[i].OutDim][];
+                    accumWeightGrad[i] = new float[network.Weights[i].OutDim][];
+                    for (int j = 0; j < network.Weights[i].OutDim; j++)
                     {
-                        weightMomentum[i][j] = new float[network.Weights[i].inDim];
-                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
-                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                        weightMomentum[i][j] = new float[network.Weights[i].InDim];
+                        accumWeightGrad[i][j] = new float[network.Weights[i].InDim];
+                        for (int k = 0; k < network.Weights[i].InDim; k++)
                         {
-                            weightMomentum[i][j][k] = 0.000001f; // epsilon = 10^-6
-                            accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
+                            weightMomentum[i][j][k] = epsilon; 
+                            accumWeightGrad[i][j][k] = epsilon; 
                         }
                     }
                 }
@@ -528,8 +685,8 @@ namespace BTLib
                     accumBiasGrad[i] = new float[network.Layers[i].dim];
                     for (int j = 0; j < network.Layers[i].dim; j++)
                     {
-                        biasMomentum[i][j] = 0.000001f; // epsilon = 10^-6
-                        accumBiasGrad[i][j] = 0.000001f; // epsilon = 10^-6
+                        biasMomentum[i][j] = epsilon; 
+                        accumBiasGrad[i][j] = epsilon; 
                     }
 
                     if (network.Layers[i] is BatchNormLayer)
@@ -552,7 +709,7 @@ namespace BTLib
                     beta2 * accumWeightGrad[weightsIndex][outIndex][inIndex] +
                     (1 - beta2) * (gradient * gradient + weightDecay * network.Weights[weightsIndex].GetWeight(inIndex, outIndex));
 
-                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - (learningRate * weightMomentum[weightsIndex][outIndex][inIndex] / MathF.Sqrt(accumWeightGrad[weightsIndex][outIndex][inIndex]));
+                return network.Weights[weightsIndex].GetWeight(inIndex, outIndex) - (learningRate * weightMomentum[weightsIndex][outIndex][inIndex]) / OffsetZero(MathF.Sqrt(accumWeightGrad[weightsIndex][outIndex][inIndex]));
             }
 
             public override float BiasUpdate(int layerIndex, int perceptron, float gradient)
@@ -560,7 +717,7 @@ namespace BTLib
                 biasMomentum[layerIndex][perceptron] = beta1 * biasMomentum[layerIndex][perceptron] + (1 - beta1) * gradient;
                 accumBiasGrad[layerIndex][perceptron] = beta2 * accumBiasGrad[layerIndex][perceptron] + (1 - beta2) * gradient * gradient;
 
-                return network.Layers[layerIndex].GetBias(perceptron) - (learningRate * biasMomentum[layerIndex][perceptron] / MathF.Sqrt(accumBiasGrad[layerIndex][perceptron]));
+                return network.Layers[layerIndex].GetBias(perceptron) - (learningRate * biasMomentum[layerIndex][perceptron]) / OffsetZero(MathF.Sqrt(accumBiasGrad[layerIndex][perceptron]));
             }
 
             public float GammaUpdate(int layerIndex, float gradient)
@@ -568,7 +725,7 @@ namespace BTLib
                 gammaMomentum[bnIndexLookup[layerIndex]] = beta1 * gammaMomentum[bnIndexLookup[layerIndex]] + (1 - beta1) * gradient;
                 accumGammaGrad[bnIndexLookup[layerIndex]] = beta2 * accumGammaGrad[bnIndexLookup[layerIndex]] + (1 - beta2) * gradient * gradient;
 
-                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - (learningRate * gammaMomentum[bnIndexLookup[layerIndex]] / MathF.Sqrt(accumGammaGrad[bnIndexLookup[layerIndex]]));
+                return ((BatchNormLayer)network.Layers[layerIndex]).gamma - (learningRate * gammaMomentum[bnIndexLookup[layerIndex]]) / OffsetZero(MathF.Sqrt(accumGammaGrad[bnIndexLookup[layerIndex]]));
             }
 
             public float BetaUpdate(int layerIndex, float gradient)
@@ -576,7 +733,21 @@ namespace BTLib
                 betaMomentum[bnIndexLookup[layerIndex]] = beta1 * betaMomentum[bnIndexLookup[layerIndex]] + (1 - beta1) * gradient;
                 accumBetaGrad[bnIndexLookup[layerIndex]] = beta2 * accumBetaGrad[bnIndexLookup[layerIndex]] + (1 - beta2) * gradient * gradient;
 
-                return ((BatchNormLayer)network.Layers[layerIndex]).beta - (learningRate * betaMomentum[bnIndexLookup[layerIndex]] / MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]]));
+                return ((BatchNormLayer)network.Layers[layerIndex]).beta - (learningRate * betaMomentum[bnIndexLookup[layerIndex]]) / OffsetZero(MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]]));
+            }
+
+            float OffsetZero(float value)
+            {
+                float rs = value;
+                if (MathF.Abs(value) < epsilon)
+                    rs = MathF.Sign(value) * epsilon;
+                return rs;
+            }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("learningRate", learningRate);
+                yield return ("weightDecay", weightDecay);
             }
         }
 
@@ -601,11 +772,11 @@ namespace BTLib
                 accumWeightGrad = new float[network.Weights.Length][][];
                 for (int i = 0; i < network.Weights.Length; i++)
                 {
-                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
-                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    accumWeightGrad[i] = new float[network.Weights[i].OutDim][];
+                    for (int j = 0; j < network.Weights[i].OutDim; j++)
                     {
-                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
-                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                        accumWeightGrad[i][j] = new float[network.Weights[i].InDim];
+                        for (int k = 0; k < network.Weights[i].InDim; k++)
                             accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
                     }
                 }
@@ -654,6 +825,11 @@ namespace BTLib
 
                 return ((BatchNormLayer)network.Layers[layerIndex]).beta - (eta / MathF.Sqrt(accumBetaGrad[bnIndexLookup[layerIndex]])) * gradient;
             }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("weightDecay", weightDecay);
+            }
         }
 
         public class AdaDelta : Optimizer, IBatchNormOptimizable
@@ -678,13 +854,13 @@ namespace BTLib
                 accumRescaledWeightGrad = new float[network.Weights.Length][][];
                 for (int i = 0; i < network.Weights.Length; i++)
                 {
-                    accumWeightGrad[i] = new float[network.Weights[i].outDim][];
-                    accumRescaledWeightGrad[i] = new float[network.Weights[i].outDim][];
-                    for (int j = 0; j < network.Weights[i].outDim; j++)
+                    accumWeightGrad[i] = new float[network.Weights[i].OutDim][];
+                    accumRescaledWeightGrad[i] = new float[network.Weights[i].OutDim][];
+                    for (int j = 0; j < network.Weights[i].OutDim; j++)
                     {
-                        accumWeightGrad[i][j] = new float[network.Weights[i].inDim];
-                        accumRescaledWeightGrad[i][j] = new float[network.Weights[i].inDim];
-                        for (int k = 0; k < network.Weights[i].inDim; k++)
+                        accumWeightGrad[i][j] = new float[network.Weights[i].InDim];
+                        accumRescaledWeightGrad[i][j] = new float[network.Weights[i].InDim];
+                        for (int k = 0; k < network.Weights[i].InDim; k++)
                         {
                             accumWeightGrad[i][j][k] = 0.000001f; // epsilon = 10^-6
                             accumRescaledWeightGrad[i][j][k] = 0.0000001f;
@@ -768,6 +944,11 @@ namespace BTLib
 
                 return ((BatchNormLayer)network.Layers[layerIndex]).beta - rescaledGrad;
             }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("weightDecay", weightDecay);
+            }
         }
 
         #endregion
@@ -786,11 +967,11 @@ namespace BTLib
             Custom
         }
 
-        public class BatchNormLayer : ForwardLayer
+        public class BatchNormLayer : ActivationForwardLayer
         {
             public float gamma = 1, beta = 0;
 
-            public BatchNormLayer(ForwardPort port) : base(ActivationFunc.Custom, port, false) { }
+            public BatchNormLayer(ForwardLayer.ForwardPort port) : base(ActivationFunc.Custom, port, false) { }
 
             public override float[][] Forward(float[][] inputs)
             {
@@ -890,11 +1071,11 @@ namespace BTLib
 
         }
 
-        public class NormalizationLayer : ForwardLayer
+        public class NormalizationLayer : ActivationForwardLayer
         {
             public float gamma, beta;
 
-            public NormalizationLayer(float min, float max, ForwardPort port) : base(ActivationFunc.Custom, port, false)
+            public NormalizationLayer(float min, float max, ForwardLayer.ForwardPort port) : base(ActivationFunc.Custom, port, false)
             {
                 gamma = 1 / (max - min);
                 beta = -min;
@@ -911,18 +1092,74 @@ namespace BTLib
             }
         }
 
-        public class ForwardLayer : ActivationLayer
+        public class Dropout : ForwardLayer
         {
-            public enum ForwardPort
+            public float rate;
+
+            bool[] drops;
+
+            [JsonConstructor]
+            public Dropout(float rate) : base(1f, 0f, ForwardPort.In, false)
             {
-                In,
-                Out,
-                Both
+                this.rate = rate;
             }
 
-            public readonly ForwardPort port;
+            public override void Build(INeuralNetwork network)
+            {
+                base.Build(network);
+                drops = new bool[dim];
+            }
 
-            public ForwardLayer(ActivationFunc func, ForwardPort port, bool useBias = true) : base(-1, func, useBias)
+            public override float[] Forward(float[] X)
+            {
+                float[] result = new float[dim];
+                var rand = new Random();
+
+                for (int i = 0; i < dim; i++)
+                {
+                    drops[i] = (float)rand.NextDouble() < rate;
+                    result[i] = drops[i] ? 0f : X[i];
+                }
+
+                return result;
+            }
+
+            public override float[] Infer(float[] X)
+            {
+                float[] Y = new float[dim];
+
+                for (int i = 0; i < dim; i++)
+                    Y[i] = X[i];
+
+                return Y;
+            }
+
+            public override float[] FunctionDifferential(float[] X, float[] loss)
+            {
+                float[] result = new float[X.Length];
+                for (int i = 0; i < X.Length; i++)
+                    result[i] = drops[i] ? 0f : loss[i];
+
+                return result;
+            }
+
+            public override IEnumerable<(string,object)> GetJsonProperties()
+            {
+                yield return ("rate", rate);
+            }
+        }
+
+        public class ActivationForwardLayer : ActivationLayer
+        {
+            public readonly ForwardLayer.ForwardPort port;
+
+            public ActivationForwardLayer(ActivationFunc func, ForwardLayer.ForwardPort port, bool useBias = true) : base(-1, func, useBias)
+            {
+                this.port = port;
+            }
+
+            [JsonConstructor]
+            protected ActivationForwardLayer(float[] biases, bool useBias, ActivationFunc func, ForwardLayer.ForwardPort port) : base(biases, useBias, func)
             {
                 this.port = port;
             }
@@ -933,20 +1170,28 @@ namespace BTLib
 
                 switch (port)
                 {
-                    case ForwardPort.In:
+                    case ForwardLayer.ForwardPort.In:
                         dim = network.Layers[layerIndex - 1].dim;
                         break;
-                    case ForwardPort.Out:
+                    case ForwardLayer.ForwardPort.Out:
                         dim = network.Layers[layerIndex + 1].dim;
                         break;
-                    case ForwardPort.Both:
+                    case ForwardLayer.ForwardPort.Both:
                         if (network.Layers[layerIndex - 1].dim != network.Layers[layerIndex + 1].dim)
                             throw new Exception("Nah forward layer dim");
                         dim = network.Layers[layerIndex + 1].dim;
                         break;
                 }
 
-                biases = new float[dim];
+                biases ??= new float[dim];
+            }
+
+            public override IEnumerable<(string,object)> GetJsonProperties()
+            {
+                yield return ("biases", biases);
+                yield return ("useBias", useBias);
+                yield return ("func", func);
+                yield return ("port", port);
             }
 
             public override WeightMatrix GenerateWeightMatrix()
@@ -964,6 +1209,12 @@ namespace BTLib
                 this.func = func;
             }
 
+            [JsonConstructor]
+            protected ActivationLayer(float[] biases, bool useBias, ActivationFunc func) : base(biases, useBias)
+            {
+                this.func = func;
+            }
+
             public override float[] Forward(float[] x)
             {
                 return ForwardActivation(func, x);
@@ -977,6 +1228,20 @@ namespace BTLib
             public override float FunctionDifferential(float x, float loss, float offset = 0)
             {
                 return ActivationDifferential(func, x + offset, loss);
+            }
+
+            public override Layer Clone()
+            {
+                var clone = new ActivationLayer(dim, func, useBias);
+                CloneTo(clone);
+                return clone;
+            }
+
+            public override IEnumerable<(string,object)> GetJsonProperties()
+            {
+                yield return ("biases", biases);
+                yield return ("useBias", useBias);
+                yield return ("func", func);
             }
 
             public static float ActivationDifferential(ActivationFunc func, float x, float loss)
@@ -1101,14 +1366,25 @@ namespace BTLib
                         break;
                     case ActivationFunc.Softmax:
                         float temp = 0;
+                        float min = X[0];
+
+                        for (int i = 1; i < X.Length; i++)
+                            if (min > X[i])
+                                min = X[i];
+
                         for (int i = 0; i < X.Length; i++)
                         {
-                            result[i] = MathF.Exp(X[i]);
+                            result[i] = MathF.Exp(X[i] - min);
                             temp += result[i];
                         }
                         temp = 1f / temp;
                         for (int i = 0; i < X.Length; i++)
+                        {
                             result[i] *= temp;
+                            if (result[i] is float.NaN)
+                                result[i] = 0;
+                        }
+                        UnityEngine.Debug.Log(ArrayToString(X) + "\n\t  " + ArrayToString(result));
                         break;
                     case ActivationFunc.Linear:
                     default:
@@ -1119,8 +1395,80 @@ namespace BTLib
             }
         }
 
-        public class Layer
+        public class ForwardLayer : Layer
         {
+            public enum ForwardPort
+            {
+                In,
+                Out,
+                Both
+            }
+
+            public readonly ForwardPort port;
+
+            float w, b;
+
+            public ForwardLayer(float w, float b, ForwardPort port = ForwardPort.In, bool useBias = false) : base(-1, useBias)
+            {
+                this.port = port;
+                this.w = w;
+                this.b = b;
+            }
+
+            [JsonConstructor]
+            protected ForwardLayer(float[] biases, bool useBias, float w, float b, ForwardPort port) : base(biases, useBias)
+            {
+                this.port = port;
+                this.w = w;
+                this.b = b;
+            }
+
+            public override IEnumerable<(string,object)> GetJsonProperties()
+            {
+                yield return ("biases", biases);
+                yield return ("useBias", useBias);
+                yield return ("w", w);
+                yield return ("b", b);
+                yield return ("port", port);
+            }
+
+            public override void Build(INeuralNetwork network)
+            {
+                base.Build(network);
+
+                switch (port)
+                {
+                    case ForwardPort.In:
+                        dim = network.Layers[layerIndex - 1].dim;
+                        break;
+                    case ForwardPort.Out:
+                        dim = network.Layers[layerIndex + 1].dim;
+                        break;
+                    case ForwardPort.Both:
+                        if (network.Layers[layerIndex - 1].dim != network.Layers[layerIndex + 1].dim)
+                            throw new Exception("Nah forward layer dim");
+                        dim = network.Layers[layerIndex + 1].dim;
+                        break;
+                }
+
+                if (biases == null)
+                {
+                    biases = new float[dim];
+                    for (int i = 0; i < dim; i++)
+                        biases[i] = b;
+                }
+            }
+
+            public override WeightMatrix GenerateWeightMatrix()
+            {
+                return new ForwardWeightMatrix(w, useBias);
+            }
+        }
+
+        public class Layer : IJsonConvertable
+        {
+            static readonly Dictionary<string, Type> layerTypes = GetChildrenTypeOf<Layer>();
+
             public readonly bool useBias;
 
             public int dim { get; protected set; } = -1;
@@ -1144,6 +1492,14 @@ namespace BTLib
                 this.biases = biases;
             }
 
+            [JsonConstructor]
+            protected Layer(float[] biases, bool useBias)
+            {
+                this.dim = biases.Length;
+                this.useBias = useBias;
+                this.biases = biases;
+            }
+
             public virtual void Build(INeuralNetwork network)
             {
                 this.network = network;
@@ -1157,23 +1513,20 @@ namespace BTLib
                 throw new Exception("nah layer findings");
             }
 
-            public virtual float GetBias(int index) => useBias ? biases[index] : 0;
+            public virtual float GetBias(int index) => biases[index];
 
-            public virtual void SetBias(int index, float value) => biases[index] = useBias ? value : 0;
+            public virtual void SetBias(int index, float value) => biases[index] = useBias ? value : biases[index];
 
             /// <returns>Returns descended errors</returns>
             public virtual void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
             {
-                if (!useBias)
-                    return;
-
                 for (int sample = 0; sample < errors.Length; sample++)
                 {
                     errors[sample] = FunctionDifferential(log.layerInputs[layerIndex][sample], errors[sample]);
 
-                    // bias update
-                    //for (int i = 0; i < dim; i++)
-                    //    SetBias(i, optimizer.BiasUpdate(layerIndex, i, errors[sample][i]));
+                    if (useBias)
+                        for (int i = 0; i < dim; i++)
+                            SetBias(i, optimizer.BiasUpdate(layerIndex, i, errors[sample][i]));
                 }
             }
 
@@ -1200,6 +1553,11 @@ namespace BTLib
                 return result;
             }
 
+            public virtual float[] Infer(float[] X)
+            {
+                return Forward(X);
+            }
+
             /// <summary>
             /// Will be called indirectly through <b>FunctionDifferential(float[] X)</b> if wasn't overridden
             /// </summary>
@@ -1224,6 +1582,28 @@ namespace BTLib
                 return new DenseWeightMatrix();
             }
 
+            public virtual void CloneTo(Layer layer)
+            {
+                for (int i = 0; i < dim; i++)
+                    layer.SetBias(i, biases[i]);
+            }
+            public virtual Layer Clone()
+            {
+                return useBias ? new Layer(biases) : new Layer(dim, false);
+            }
+
+            public virtual IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("biases", biases);
+                yield return ("useBias", useBias);
+            }
+
+            public static void ToJson(JsonWriter writer, Layer layer)
+                => StoreJson(writer, layer);
+
+            public static Layer FromJson(string json)
+                => (Layer)LoadJson(json, layerTypes);
+
             public static implicit operator Layer(int dim) => new Layer(dim);
         }
 
@@ -1231,17 +1611,19 @@ namespace BTLib
 
         #region Weight matrix
 
-        public abstract class WeightMatrix
+        public abstract class WeightMatrix : IJsonConvertable
         {
-            public int inDim { get; protected set; }
-            public int outDim { get; protected set; }
-            public INeuralNetwork network { get; protected set; }
+            readonly static Dictionary<string, Type> weightTypes = GetChildrenTypeOf<WeightMatrix>();
+
+            public int InDim { get; protected set; }
+            public int OutDim { get; protected set; }
+            public INeuralNetwork Network { get; protected set; }
 
             protected int weightsIndex;
 
             public virtual void Build(INeuralNetwork network)
             {
-                this.network = network;
+                this.Network = network;
                 for (int i = 0; i < network.Weights.Length; i++)
                     if (network.Weights[i] == this)
                     {
@@ -1271,6 +1653,18 @@ namespace BTLib
             public abstract bool TryGetWeight(int inIndex, int outIndex, out float weight);
 
             public abstract float GetWeight(int inIndex, int outIndex);
+
+            public abstract void CloneTo(WeightMatrix weights);
+
+            public abstract WeightMatrix Clone();
+
+            public abstract IEnumerable<(string,object)> GetJsonProperties();
+
+            public static void ToJson(JsonWriter writer, WeightMatrix weights)
+                => StoreJson(writer, weights);
+
+            public static WeightMatrix FromJson(string json)
+                => (WeightMatrix)LoadJson(json, weightTypes);
         }
 
         public class ForwardWeightMatrix : WeightMatrix
@@ -1279,10 +1673,26 @@ namespace BTLib
 
             public float[] matrix;
 
-            public int dim => inDim;
+            public int dim => InDim;
+
+            float w = float.NaN;
 
             public ForwardWeightMatrix(bool useWeights = true)
             {
+                this.useWeights = useWeights;
+            }
+
+            public ForwardWeightMatrix(float w, bool useWeights = false)
+            {
+                this.useWeights = useWeights;
+                this.w = w;
+            }
+
+            [JsonConstructor]
+            private ForwardWeightMatrix(float[] matrix, bool useWeights, float w)
+            {
+                this.matrix = matrix;
+                this.w = w;
                 this.useWeights = useWeights;
             }
 
@@ -1291,35 +1701,36 @@ namespace BTLib
                 base.Build(network);
 
                 if (network.Layers[weightsIndex] is ForwardLayer && ((ForwardLayer)network.Layers[weightsIndex]).port != ForwardLayer.ForwardPort.In)
-                    inDim = outDim = network.Layers[weightsIndex].dim;
+                    InDim = OutDim = network.Layers[weightsIndex].dim;
                 else if (network.Layers[weightsIndex + 1] is ForwardLayer && ((ForwardLayer)network.Layers[weightsIndex + 1]).port != ForwardLayer.ForwardPort.Out)
-                    inDim = outDim = network.Layers[weightsIndex + 1].dim;
+                    InDim = OutDim = network.Layers[weightsIndex + 1].dim;
                 else
                     throw new Exception("Nah forward weight dim");
 
-                matrix = new float[dim];
+                if (matrix == null)
+                {
+                    matrix = new float[dim];
+                    if (!(w is float.NaN))
+                        for (int i = 0; i < dim; i++)
+                            matrix[i] = w;
+                }
             }
 
             public override void AssignForEach(Func<int, int, float, float> value)
             {
-                for (int i = 0; i < dim; i++)
-                {
-                    if (useWeights)
+                if (useWeights)
+                    for (int i = 0; i < dim; i++)
                         matrix[i] = value(i, i, matrix[i]);
-                    else
-                        value(i, i, 1);
-                }
             }
 
             public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
             {
-                if (!useWeights) return;
 
                 float[] weightErrorSum = new float[matrix.Length];
                 for (int sample = 0; sample < errors.Length; sample++)
                 {
-                    float[] layerForward = network.Layers[weightsIndex].Forward(log.layerInputs[weightsIndex][sample]);
-                    float[] layerDif = network.Layers[weightsIndex].FunctionDifferential(log.layerInputs[weightsIndex][sample], errors[sample]);
+                    float[] layerForward = Network.Layers[weightsIndex].Forward(log.layerInputs[weightsIndex][sample]);
+                    float[] layerDif = Network.Layers[weightsIndex].FunctionDifferential(log.layerInputs[weightsIndex][sample], errors[sample]);
 
                     for (int i = 0; i < matrix.Length; i++)
                     {
@@ -1327,6 +1738,8 @@ namespace BTLib
                         errors[sample][i] = matrix[i] * layerDif[i];
                     }
                 }
+
+                if (!useWeights) return;
 
                 for (int i = 0; i < matrix.Length; i++)
                     matrix[i] = optimizer.WeightUpdate(weightsIndex, i, i, weightErrorSum[i]);
@@ -1351,48 +1764,27 @@ namespace BTLib
 
                 for (int i = 0; i < inputs.Length; i++)
                     for (int j = 0; j < dim; j++)
-                    {
-                        if (useWeights)
-                            result[i][j] = inputs[i][j] * matrix[j];
-                        else
-                            result[i][j] = inputs[i][j];
-                    }
+                        result[i][j] = inputs[i][j] * matrix[j];
 
                 return result;
             }
 
             public override float ForwardComp(float[] inputs, int outputIndex)
             {
-                if (useWeights)
-                    return inputs[outputIndex] * matrix[outputIndex];
-                else
-                    return inputs[outputIndex];
+                return inputs[outputIndex] * matrix[outputIndex];
             }
 
             public override float GetWeight(int inIndex, int outIndex)
             {
-                if (useWeights)
-                {
-                    if (inIndex == outIndex && inIndex < dim)
-                        return matrix[inIndex];
-                }
-                else if (inIndex == outIndex)
-                    return 1;
-                else
-                    return 0;
+                if (inIndex == outIndex && inIndex < dim)
+                    return matrix[inIndex];
 
                 throw new Exception("No weight here bro");
             }
 
             public override bool TryGetWeight(int inIndex, int outIndex, out float weight)
             {
-                if (useWeights)
-                    weight = matrix[inIndex];
-                else if (inIndex == outIndex)
-                    weight = 1;
-                else
-                    weight = 0;
-
+                weight = matrix[inIndex];
                 return inIndex == outIndex && inIndex < dim;
             }
 
@@ -1406,6 +1798,28 @@ namespace BTLib
 
                 return false;
             }
+
+            public override void CloneTo(WeightMatrix weights)
+            {
+                for (int i = 0; i < InDim; i++)
+                    weights.TrySetWeight(i, i, matrix[i]);
+            }
+
+            public override WeightMatrix Clone()
+            {
+                var clone = new ForwardWeightMatrix(useWeights);
+                clone.matrix = new float[InDim];
+                CloneTo(clone);
+
+                return clone;
+            }
+
+            public override IEnumerable<(string,object)> GetJsonProperties()
+            {
+                yield return ("matrix", matrix);
+                yield return ("useWeights", useWeights);
+                yield return ("w", w);
+            }
         }
 
         public class DenseWeightMatrix : WeightMatrix
@@ -1414,34 +1828,40 @@ namespace BTLib
 
             public DenseWeightMatrix() { }
 
+            [JsonConstructor]
+            private DenseWeightMatrix(float[,] matrix)
+            {
+                this.matrix = matrix;
+            }
+
             public override void Build(INeuralNetwork network)
             {
                 base.Build(network);
 
-                inDim = network.Layers[weightsIndex].dim;
-                outDim = network.Layers[weightsIndex + 1].dim;
+                InDim = network.Layers[weightsIndex].dim;
+                OutDim = network.Layers[weightsIndex + 1].dim;
 
-                matrix = new float[outDim, inDim];
+                matrix ??= new float[OutDim, InDim];
             }
 
             public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
             {
-                Layer prevLayer = network.Layers[weightsIndex];
+                Layer prevLayer = Network.Layers[weightsIndex];
 
                 float[][] weightErrors = new float[errors.Length][];
                 for (int i = 0; i < errors.Length; i++)
-                    weightErrors[i] = new float[inDim];
+                    weightErrors[i] = new float[InDim];
 
-                float[][] weightErrorSum = new float[outDim][];
-                for (int i = 0; i < outDim; i++)
-                    weightErrorSum[i] = new float[inDim];
+                float[][] weightErrorSum = new float[OutDim][];
+                for (int i = 0; i < OutDim; i++)
+                    weightErrorSum[i] = new float[InDim];
 
                 for (int sample = 0; sample < errors.Length; sample++)
                 {
                     float[] layerForward = prevLayer.Forward(log.layerInputs[weightsIndex][sample]);
 
-                    for (int i = 0; i < outDim; i++)
-                        for (int j = 0; j < inDim; j++)
+                    for (int i = 0; i < OutDim; i++)
+                        for (int j = 0; j < InDim; j++)
                         {
                             weightErrorSum[i][j] += errors[sample][i] * layerForward[j];
                             weightErrors[sample][j] += errors[sample][i] * matrix[i, j];
@@ -1450,8 +1870,8 @@ namespace BTLib
                     weightErrors[sample] = prevLayer.FunctionDifferential(log.layerInputs[weightsIndex][sample], weightErrors[sample]);
                 }
 
-                for (int i = 0; i < outDim; i++)
-                    for (int j = 0; j < inDim; j++)
+                for (int i = 0; i < OutDim; i++)
+                    for (int j = 0; j < InDim; j++)
                         matrix[i, j] = optimizer.WeightUpdate(weightsIndex, j, i, weightErrorSum[i][j]);
 
                 errors = weightErrors;
@@ -1467,17 +1887,17 @@ namespace BTLib
 
             public override void AssignForEach(Func<int, int, float, float> value)
             {
-                for (int i = 0; i < outDim; i++)
-                    for (int j = 0; j < inDim; j++)
+                for (int i = 0; i < OutDim; i++)
+                    for (int j = 0; j < InDim; j++)
                         matrix[i, j] = value(j, i, matrix[i, j]);
             }
 
             public override float[] Forward(float[] inputs)
             {
-                float[] result = new float[outDim];
+                float[] result = new float[OutDim];
 
-                for (int i = 0; i < outDim; i++)
-                    for (int j = 0; j < inDim; j++)
+                for (int i = 0; i < OutDim; i++)
+                    for (int j = 0; j < InDim; j++)
                         result[i] += inputs[j] * matrix[i, j];
 
                 return result;
@@ -1488,11 +1908,11 @@ namespace BTLib
                 float[][] result = new float[inputs.Length][];
 
                 for (int i = 0; i < inputs.Length; i++)
-                    result[i] = new float[outDim];
+                    result[i] = new float[OutDim];
 
                 for (int i = 0; i < inputs.Length; i++)
-                    for (int j = 0; j < outDim; j++)
-                        for (int k = 0; k < inDim; k++)
+                    for (int j = 0; j < OutDim; j++)
+                        for (int k = 0; k < InDim; k++)
                             result[i][j] += inputs[i][k] * matrix[j, k];
 
                 return result;
@@ -1513,6 +1933,27 @@ namespace BTLib
                 matrix[outIndex, inIndex] = value;
                 return true;
             }
+
+            public override void CloneTo(WeightMatrix weights)
+            {
+                for (int i = 0; i < OutDim; i++)
+                    for (int j = 0; j < InDim; j++)
+                        weights.TrySetWeight(j, i, matrix[i, j]);
+            }
+
+            public override WeightMatrix Clone()
+            {
+                var clone = new DenseWeightMatrix();
+                clone.matrix = new float[OutDim, InDim];
+                CloneTo(clone);
+
+                return clone;
+            }
+
+            public override IEnumerable<(string, object)> GetJsonProperties()
+            {
+                yield return ("matrix", matrix);
+            }
         }
 
         #endregion
@@ -1532,12 +1973,14 @@ namespace BTLib
 
                 void Init();
 
-                float Evaluate(IAgent agent);
+                float Evaluate(IAgent agent, Record rec);
 
                 /// <summary>
                 /// Reset all including environment and agents
                 /// </summary>
                 void ResetStates();
+
+                public class Record { }
             }
 
             public interface IAgent
@@ -1545,6 +1988,7 @@ namespace BTLib
                 IEnvironment Env { get; }
                 IPolicy Policy { get; }
                 IPolicyOptimization PolicyOpt { get; }
+                ConcludeType ConcludedType { get; }
 
                 /// <summary>
                 /// Reset states, not policy
@@ -1562,25 +2006,37 @@ namespace BTLib
             {
                 float[] Forward(float[] obs);
 
+                float[] Infer(float[] obs);
+
                 void Update(float[] loss);
+
+                IPolicy Clone();
+
+                void CloneTo(IPolicy policy);
+
+                void Save(string filepath);
+
+                void Load(string filepath);
             }
 
             public interface IPolicyOptimization
             {
                 IPolicy Policy { get; }
 
-                int GetAction(float[] actProbs);
+                int GetAction(float[] obs);
 
-                virtual float[][] ComputeLoss(float[][] obs, int[] actions, float[] mass, bool logits = false)
+                virtual float[][] ComputeLoss(float[][] obs, int[] actions, float[] rews, bool logits = false)
                 {
                     float[][] loss = new float[obs.Length][];
                     for (int i = 0; i < loss.Length; i++)
-                        loss[i] = ComputeLoss(obs[i], actions[i], mass[i], logits);
+                        loss[i] = ComputeLoss(obs[i], actions[i], rews[i], logits);
 
                     return loss;
                 }
 
-                float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false);
+                float[] ComputeLoss(float[] obs, int action, float rew, bool logits = false);
+
+                void Step();
             }
 
             public class Reinforce : IPolicyOptimization
@@ -1592,9 +2048,9 @@ namespace BTLib
                     Policy = policy;
                 }
 
-                public virtual int GetAction(float[] actProbs) => MathBT.DrawProbs(actProbs);
+                public virtual int GetAction(float[] obs) => DrawProbs(Policy.Forward(obs));
 
-                public virtual float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false)
+                public virtual float[] ComputeLoss(float[] obs, int action, float rew, bool logits = false)
                 {
                     float[] outputs;
                     if (logits)
@@ -1604,41 +2060,142 @@ namespace BTLib
 
                     for (int i = 0; i < outputs.Length; i++)
                     {
-                        outputs[i] = i == action ? -(1 / outputs[i]) * mass : 0;
+                        if (i == action)
+                        {
+                            var l = -(1 / outputs[i]) * rew;
+                            //var abs = Math.Abs(l);
+                            //if (abs < 0.3f)
+                            //    l = MathF.Sign(l) * 0.3f;
+                            outputs[i] = l;
+                        }
+                        else
+                            outputs[i] = 0;
                     }
 
                     return outputs;
+                }
+
+                public void Step() { }
+            }
+
+            public class DeepQLearning : IPolicyOptimization
+            {
+                public IPolicy Policy { get; private set; }
+                public IPolicy TargetPolicy { get; private set; }
+
+                public float discountFactor;
+                public int updateIteration;
+
+                int curCount = 0;
+
+                public DeepQLearning(IPolicy policy, float discountFactor, int updateIteration)
+                {
+                    Policy = policy;
+                    TargetPolicy = policy.Clone();
+                    ((INeuralNetwork)TargetPolicy).BiasAssignForEach((b, dim) => 0f);
+                    ((INeuralNetwork)TargetPolicy).WeightAssignForEach((w, inDim, outDim) =>
+                    {
+                        float stddev = UnityEngine.Mathf.Sqrt(6f / inDim);
+                        return UnityEngine.Random.Range(-stddev, stddev);
+                    });
+                    this.discountFactor = discountFactor;
+                    this.updateIteration = updateIteration;
+                }
+
+                public virtual int GetAction(float[] obs)
+                {
+                    float[] outputs = Policy.Forward(obs);
+                    int min = 0;
+                    for (int i = 1; i < outputs.Length; i++)
+                        if (outputs[min] > outputs[i])
+                            min = i;
+                    for (int i = 1; i < outputs.Length; i++)
+                        outputs[i] -= outputs[min];
+                    return DrawProbs(outputs);
+                }
+
+                public virtual float[] ComputeLoss(float[] obs, int action, float rew, bool logits = false)
+                {
+                    float[] outputs = TargetPolicy.Forward(obs);
+
+                    int max = 0;
+                    for (int i = 1; i < outputs.Length; i++)
+                        if (outputs[max] < outputs[i])
+                            max = i;
+
+                    //UnityEngine.Debug.Log(string.Join(", ", Policy.Forward(obs)));
+                    //UnityEngine.Debug.Log(string.Join(", ", outputs));
+                    //UnityEngine.Debug.Log(max);
+                    //UnityEngine.Debug.Log("rew: " + rew);
+                    float[] loss = new float[outputs.Length];
+                    float l = -(rew + discountFactor * outputs[max] - Policy.Forward(obs)[action]);
+                    //UnityEngine.Debug.Log(l);
+                    if (l > 10)
+                        l = 10;
+                    if (l < -5)
+                        l = -5;
+                    if (l is float.NaN)
+                    {
+                        UnityEngine.Debug.Log("fixed");
+                        l = 0;
+                    }
+                    //UnityEngine.Debug.Log(l);
+                    loss[max] = l;
+
+                    //UnityEngine.Debug.Log("loss: " + string.Join(", ", loss));
+
+                    return loss;
+                }
+
+                public void Step()
+                {
+                    if (++curCount > updateIteration)
+                    {
+                        TargetPolicy = Policy.Clone();
+                        curCount = 0;
+                    }
                 }
             }
 
             public class ExplorationWrapper : IPolicyOptimization
             {
                 public IPolicyOptimization content;
-                public float exploreRate, exploreDecay;
+                public double exploreRate, exploreDecay, minRate;
+                public int actionNum;
 
                 public IPolicy Policy => content.Policy;
 
-                public ExplorationWrapper(IPolicyOptimization content, float initialRate, float decay)
+                public ExplorationWrapper(IPolicyOptimization content, float initialRate, float decay, int actionNum, float minRate)
                 {
                     this.content = content;
+                    this.actionNum = actionNum;
                     exploreRate = initialRate;
                     exploreDecay = decay;
+                    this.minRate = minRate;
                 }
 
-                public int GetAction(float[] actProbs)
+                public int GetAction(float[] obs)
                 {
                     int act = -1;
                     Random rand = new();
                     if (rand.NextDouble() > exploreRate)
-                        act = content.GetAction(actProbs);
+                        act = content.GetAction(obs);
                     else
-                        act = rand.Next(actProbs.Length);
-                    exploreRate *= exploreDecay;
+                        act = rand.Next(0, actionNum);
+
                     return act;
                 }
 
                 public float[] ComputeLoss(float[] obs, int action, float mass, bool logits = false)
                     => content.ComputeLoss(obs, action, mass, logits);
+
+                public void Step()
+                {
+                    content.Step();
+                    exploreRate *= exploreDecay;
+                    if (exploreRate < minRate)
+                        exploreRate = minRate;
+                }
             }
         }
     }
@@ -2036,20 +2593,89 @@ namespace BTLib
 
     namespace Utility
     {
-        public static class MathBT
+        public static class Common
         {
+            public static readonly string classPropertyName = "ClassName";
+            public static readonly string contentName = "Content";
+
+            public interface IJsonConvertable
+            {
+                IEnumerable<(string, object)> GetJsonProperties();
+            }
+
+            public static void StoreJson(JsonWriter writer, IJsonConvertable val)
+            {
+                var serializer = new JsonSerializer();
+
+                writer.WriteStartObject();
+
+                writer.WritePropertyName(classPropertyName);
+                writer.WriteValue(val.GetType().Name);
+
+                writer.WritePropertyName(contentName);
+                writer.WriteStartObject();
+                foreach (var prop in val.GetJsonProperties())
+                {
+                    var type = prop.GetType();
+                    writer.WritePropertyName(prop.Item1);
+                    serializer.Serialize(writer, prop.Item2);
+                }
+                writer.WriteEndObject();
+
+                writer.WriteEndObject();
+            }
+
+            public static object LoadJson(string json, Dictionary<string, Type> typeDict)
+            {
+                var root = JObject.Parse(json);
+                var type = typeDict[root[classPropertyName].ToString()];
+
+                return JsonConvert.DeserializeObject(root[contentName].ToString(), type);
+            }
+
+            public static Dictionary<string, Type> GetChildrenTypeOf<T>()
+            {
+                var types = Assembly.GetExecutingAssembly().GetTypes()
+                    .Where(t => t.IsClass && !t.IsAbstract && typeof(T).IsAssignableFrom(t));
+
+                var rs = new Dictionary<string, Type>();
+                foreach (var t in types)
+                    rs.Add(t.Name, t);
+
+                return rs;
+            }
+
             public static int DrawProbs(float[] probs)
             {
-                double rand = new Random().NextDouble();
+                float sum = 0;
+                for (int i = 0; i < probs.Length; i++)
+                    sum += probs[i];
 
+                float rand = (float)new Random().NextDouble() * sum;
                 for (int i = 0; i < probs.Length; i++)
                 {
                     rand -= probs[i];
-                    if (rand <= 0)
+                    if (rand <= 1e-3)
                         return i;
                 }
 
                 return -1;
+            }
+
+            public static string ArrayToString(float[] floatArray, string format = "F2")
+            {
+                var sb = new StringBuilder();
+
+                for (int i = 0; i < floatArray.Length; i++)
+                {
+                    sb.Append(floatArray[i].ToString(format));
+                    if (i < floatArray.Length - 1)
+                    {
+                        sb.Append(", ");
+                    }
+                }
+
+                return sb.ToString();
             }
         }
 

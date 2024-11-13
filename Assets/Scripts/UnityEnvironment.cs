@@ -1,4 +1,4 @@
-using BTLib.AI.RL;
+using Lib.AI.RL;
 using UnityEngine;
 using System.Collections.Generic;
 
@@ -14,7 +14,7 @@ public abstract class UnityEnvironment : MonoBehaviour, IEnvironment
 
     public abstract void Init();
 
-    public abstract float Evaluate(IAgent agent);
+    public abstract float Evaluate(IAgent agent, IEnvironment.Record rec);
 
     public abstract void ResetStates();
 

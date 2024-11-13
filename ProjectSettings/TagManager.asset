@@ -5,6 +5,7 @@ TagManager:
   serializedVersion: 2
   tags:
   - Ground
+  - LowerLeg
   layers:
   - Default
   - TransparentFX
@@ -12,14 +13,14 @@ TagManager:
   - 
   - Water
   - UI
-  - Humon
   - 
-  - 
-  - 
-  - 
-  - 
-  - 
-  - 
+  - Body
+  - L_UpperLeg
+  - L_LowerLeg
+  - L_Foot
+  - R_UpperLeg
+  - R_LowerLeg
+  - R_Foot
   - 
   - 
   - 

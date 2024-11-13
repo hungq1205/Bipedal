@@ -2,30 +2,45 @@ using System;
 using System.Collections;
 using UnityEngine;
 using TMPro;
-using BTLib.AI;
-using BTLib.AI.RL;
+using Lib.AI;
+using Lib.AI.RL;
 using System.Collections.Generic;
 
 public class Humon : UnityAgent
 {
-    const float angleNormalizer = 1 / 90f;
+    const int expCap = 200;
+    const int actionNum = 13;
+    const float rotNormalizer = 1f / 9f;
+    const float angularVelNormalizer = 1f / 36f;
+    static readonly Quaternion quarterRot= Quaternion.Euler(0, 0, 90);
 
-    public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg;
+    public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg, l_Foot, r_Foot;
     public TextMeshProUGUI scoreUI;
 
+    public int expRevise = 20;
     public float learningRate = 0.01f;
     public float discountFactor = 0.95f;
     public float explorationRate = 1f, explorationDecay = 0.99f;
-    public float actionFreq = 4;
+    public float minExplorationRate = 0.1f;
+    public float actionFreq = 5;
     public float legSpeed = 13f;
-    public bool deterministic;
+    public float lyingThresholdY = -1.8f;
+    public float highLegThresholdY = -0.6f;
+    public float deactiveMilisec = 100f;
+    public float preambleMilisec = 150f;
+    [Range(0f, 2f)] public float timeScale = 1f;
+    public bool deterministic, inference;
+    public string saveFilepath = "model.json";
 
-    bool active;
-    float elapsed = 0;
+    bool active = false, preamble = true;
+    float elapsed = 0, lyingElapsed, xPosStaticElapsed, highLegElapsed, centerDif;
+    float prevX;
 
-    readonly LinkedList<float[]> trajObs = new();
-    readonly LinkedList<float> trajRews = new();
-    readonly LinkedList<int> trajActs = new();
+    readonly LinkedList<Experience> exps = new();
+    readonly LinkedList<Experience> trajectory = new();
+
+    ExplorationWrapper exploration;
+    Momentum opt;
 
     float _score;
     public float Score
@@ -48,87 +63,78 @@ public class Humon : UnityAgent
         };
 
         active = false;
-        learningRate = 0.1f;
         Policy = GetDefaultPolicy();
         PolicyOpt = new Reinforce(Policy);
-        //PolicyOpt = new ExplorationWrapper(PolicyOpt, explorationRate, explorationDecay);
-        //StartCoroutine(WaitActive());
-
-        int ni = 8, no = 8, ep = 100;
-        var x = new float[1][];
-        for (int i = 0; i < x.Length; i++)
-        {
-            x[i] = new float[ni];
-            for (int j = 0; j < x[i].Length; j++)
-                x[i][j] = UnityEngine.Random.Range(0, 10f);
-        }
-
-        var y = new float[x.Length][];
-        for (int i = 0; i < x.Length; i++)
-        {
-            y[i] = new float[no];
-            for (int j = 0; j < x[i].Length; j++)
-                y[i][j] = UnityEngine.Random.Range(0, 2);
-        }
-
-        for (int i = 0; i < x.Length; i++)
-            Debug.Log("y: " + string.Join(", ", y[i]));
-        var prev = Policy.Forward(x[0]);
-        Debug.Log("o_pre: " + string.Join(", ", prev));
-
-        for (int e = 0; e < ep; e++)
-        {
-            for (int i = 0; i < x.Length; i++)
-            {
-                var o = Policy.Forward(x[i]);
-                Debug.Log("o_" + e + ": " + string.Join(", ", o));
-                var l = new float[o.Length];
-                for (int j = 0; j < o.Length; j++)
-                    l[j] = 2 * (o[j] - y[i][j]);
-                Policy.Update(l);
-            }
-        }
-        var cur = Policy.Forward(x[0]);
-        Debug.Log("o_cur: " + string.Join(", ", cur));
+        exploration = new ExplorationWrapper(PolicyOpt, explorationRate, explorationDecay, actionNum, minExplorationRate);
+        PolicyOpt = exploration;
+        ResetStates();
     }
 
     void FixedUpdate()
     {
         if (active)
         {
-            Score = Env.Evaluate(this);
+            if (Mathf.Abs(body.position.x - prevX) < 0.12f)
+                xPosStaticElapsed += Time.fixedDeltaTime;
+            if (GetPos().y < lyingThresholdY)
+                lyingElapsed += Time.fixedDeltaTime;
+            if (l_UpperLeg.transform.position.y - body.transform.position.y > highLegThresholdY ||
+                r_UpperLeg.transform.position.y - body.transform.position.y > highLegThresholdY)
+                highLegElapsed += Time.fixedDeltaTime; 
+            centerDif = l_UpperLeg.transform.position.x + (r_UpperLeg.transform.position.x - l_LowerLeg.transform.position.x) * 0.25f;
+            centerDif -= body.transform.position.x;
+            centerDif = Mathf.Abs(centerDif);
+
+            Score = Env.Evaluate(this, new WalkingEnv.WalkingRecord(GetPos(), xPosStaticElapsed, lyingElapsed, highLegElapsed, centerDif));
+
+            if (Score <= -10)
+            {
+                Conclude(ConcludeType.Terminate);
+                Env.ResetStates();
+                ResetStates();
+            }
+
             elapsed += Time.fixedDeltaTime;
             if (elapsed * actionFreq < 1)
                 return;
-            if (trajActs.First != null)
+            if (trajectory.Last != null)
             {
-                if (trajRews.Last != null)
-                    trajRews.AddLast(Score - trajRews.Last.Value);
+                if (trajectory.Last.Previous != null)
+                    trajectory.Last.Value.rew = Score - trajectory.Last.Previous.Value.rew;
                 else
-                    trajRews.AddLast(Score);
+                    trajectory.Last.Value.rew = Score;
             }
+
             elapsed = 0;
+            exploration.minRate = minExplorationRate;
             TakeAction();
+            if (!inference)
+                PolicyOpt.Step();
+            prevX = body.position.x;
+
+            if (Time.timeScale != timeScale)
+                Time.timeScale = timeScale;
         }
     }
 
     public override IPolicy GetDefaultPolicy()
     {
-        Optimizer opt = new SGD(learningRate: learningRate);
+        opt = new Momentum(learningRate: learningRate, weightDecay: 1e-5f);
 
-        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(8);
+        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(17);
         builder.NewLayers(
-            new ActivationLayer(32, ActivationFunc.ReLU),
-            //new ActivationLayer(32, ActivationFunc.ReLU),
-            //new ActivationLayer(32, ActivationFunc.ReLU),
-            new ActivationLayer(8, ActivationFunc.Softmax)
+            new ActivationLayer(256, ActivationFunc.Tanh), new Dropout(0.15f),
+            new ActivationLayer(256, ActivationFunc.Tanh), new Dropout(0.15f),
+            new ActivationLayer(256, ActivationFunc.Tanh), new Dropout(0.15f),
+            new ActivationLayer(128, ActivationFunc.Tanh), new Dropout(0.15f),
+            new ActivationLayer(actionNum, ActivationFunc.Softmax)
         );
 
         var policy = new DenseNeuralNetwork(builder, opt);
         policy.BiasAssignForEach((b, dim) => 0f);
         policy.WeightAssignForEach((w, inDim, outDim) =>
         {
-            float stddev = Mathf.Sqrt(0.1f);
+            float stddev = Mathf.Sqrt(6f / (inDim + outDim));
             return UnityEngine.Random.Range(-stddev, stddev);
         });
 
@@ -137,46 +143,51 @@ public class Humon : UnityAgent
 
     public override void ResetStates()
     {
-        ClearTrajectory();
+        l_Foot.transform.localPosition = new Vector2(0f, -1.713f);
+        l_Foot.transform.localRotation = Quaternion.identity;
+        l_Foot.angularVelocity = 0;
+        l_Foot.velocity = Vector2.zero;
 
-        l_LowerLeg.transform.localPosition = new Vector2(-0.977177024f, -0.946023107f);
+        r_Foot.transform.localPosition = new Vector2(0f, -1.713f);
+        r_Foot.transform.localRotation = Quaternion.identity;
+        r_Foot.angularVelocity = 0;
+        r_Foot.velocity = Vector2.zero;
+
+        l_LowerLeg.transform.localPosition = new Vector2(0f, -0.92f);
+        l_LowerLeg.transform.localRotation = Quaternion.identity;
         l_LowerLeg.angularVelocity = 0;
         l_LowerLeg.velocity = Vector2.zero;
-        l_LowerLeg.transform.localRotation = Quaternion.identity;
-        SetHingeMotorSpeed(l_LowerLeg, 0);
 
-        l_UpperLeg.transform.localPosition = new Vector2(-0.977177024f, 0.183976889f);
+        l_UpperLeg.transform.localPosition = new Vector2(0f, 0.184f);
+        l_UpperLeg.transform.localRotation = Quaternion.identity;
         l_UpperLeg.angularVelocity = 0;
         l_UpperLeg.velocity = Vector2.zero;
-        l_UpperLeg.transform.localRotation = Quaternion.identity;
-        SetHingeMotorSpeed(l_UpperLeg, 0);
 
-        r_LowerLeg.transform.localPosition = new Vector2(0.0228230059f, -0.946023107f);
+        r_LowerLeg.transform.localPosition = new Vector2(0f, -0.92f);
+        r_LowerLeg.transform.localRotation = Quaternion.identity;
         r_LowerLeg.angularVelocity = 0;
         r_LowerLeg.velocity = Vector2.zero;
-        r_LowerLeg.transform.localRotation = Quaternion.identity;
-        SetHingeMotorSpeed(r_LowerLeg, 0);
 
-        r_UpperLeg.transform.localPosition = new Vector2(0.0228230059f, 0.183976889f);
+        r_UpperLeg.transform.localPosition = new Vector2(0f, 0.184f);
+        r_UpperLeg.transform.localRotation = Quaternion.identity;
         r_UpperLeg.angularVelocity = 0;
         r_UpperLeg.velocity = Vector2.zero;
-        r_UpperLeg.transform.localRotation = Quaternion.identity;
-        SetHingeMotorSpeed(r_UpperLeg, 0);
 
         body.transform.localPosition = new Vector2(0, 0.667f);
+        body.transform.localRotation = Quaternion.identity;
         body.angularVelocity = 0;
         body.velocity = Vector2.zero;
-        body.transform.localRotation = Quaternion.identity;
 
         gameObject.SetActive(true);
         ConcludedType = ConcludeType.None;
-    }
-
-    void SetHingeMotorSpeed(Rigidbody2D target, float value)
-    {
-        JointMotor2D l_motor = target.GetComponent<HingeJoint2D>().motor;
-        l_motor.motorSpeed = value;
-        target.GetComponent<HingeJoint2D>().motor = l_motor;
+        preamble = true;
+        active = false;
+        lyingElapsed = 0;
+        xPosStaticElapsed = 0;
+        highLegElapsed = 0;
+        Score = 0;
+        StartCoroutine(Preamble(preambleMilisec));
+        StartCoroutine(WaitActive(deactiveMilisec));
     }
 
     public override Vector2 GetPos() => body.position;
@@ -186,28 +197,47 @@ public class Humon : UnityAgent
         transform.localPosition = pos;
     }
 
-    public float GetPartSignedAngle(Rigidbody2D rb) => Vector2.SignedAngle(Vector2.up, rb.transform.up) * angleNormalizer + 1f;
+    public float GetPartSignedAngle(Rigidbody2D rb) => rb.transform.rotation.eulerAngles.z * rotNormalizer;
 
-    public float GetPartAngularVelocity(Rigidbody2D rb) => rb.angularVelocity * angleNormalizer;
+    public float GetPartAngularVelocity(Rigidbody2D rb) => rb.angularVelocity * angularVelNormalizer;
 
     public void AddSpin(float value, Rigidbody2D rb)
     {
-        SetHingeMotorSpeed(rb, value);
+        var trans = rb.transform;
+        var up = trans.up;
+        rb.AddForceAtPosition(quarterRot * up * (-value), trans.position - up * trans.localScale.y, ForceMode2D.Impulse);
     }
 
-    IEnumerator WaitActive(float miliSec = 750)
+    public void AddBodyForce(float value, bool neg)
     {
-        yield return new WaitForSeconds(750 / 1000);
+        var trans = body.transform;
+        var up = neg ? -trans.up : trans.up;
+        body.AddForceAtPosition(quarterRot * up * (-value), trans.position + up * trans.localScale.y, ForceMode2D.Impulse);
+    }
+
+    IEnumerator WaitActive(float miliSec = 100)
+    {
+        yield return new WaitForSeconds(miliSec / 1000f);
         active = true;
+    }
+
+    IEnumerator Preamble(float miliSec = 250)
+    {
+        yield return new WaitForSeconds(miliSec / 1000f);
+        preamble = false;
     }
 
     public override void Conclude(ConcludeType type)
     {
-        gameObject.SetActive(false);
-        Score = Env.Evaluate(this);
         ConcludedType = type;
+        gameObject.SetActive(false);
+        Score = Env.Evaluate(this, new WalkingEnv.WalkingRecord(GetPos(), xPosStaticElapsed, lyingElapsed, highLegElapsed, centerDif));
+        if (trajectory.Last != null)
+            trajectory.Last.Value.rew = Score;
 
-        UpdatePolicy();
+        if (!inference)
+            UpdatePolicy();
+        ClearTrajectory();
     }
 
     public override void Hide(bool value)
@@ -227,33 +257,59 @@ public class Humon : UnityAgent
 
     void UpdatePolicy()
     {
-        float prevRew = trajRews.Last.Value;
-        LinkedListNode<float> rewNode = trajRews.Last.Previous;
-        while (rewNode != null)
+        opt.learningRate = learningRate;
+
+        var cur = trajectory.Last.Previous;
+        string p = trajectory.Last.Value.rew + " ";
+        exps.AddLast(trajectory.Last.Value);
+        while (cur != null)
         {
-            rewNode.Value += prevRew * discountFactor;
-            prevRew = rewNode.Value;
-            rewNode = rewNode.Previous;
+            cur.Value.rew += cur.Next.Value.rew * discountFactor;
+            p += cur.Value.rew + " ";
+            if (exps.Count >= expCap)
+                exps.RemoveFirst();
+            exps.AddLast(cur.Value);
+            cur = cur.Previous;
+        }
+        Debug.Log(p);
+
+        var exp = trajectory.First;
+        while (exp != null)
+        {
+            Policy.Update(PolicyOpt.ComputeLoss(exp.Value.obs, exp.Value.act, exp.Value.rew));
+            exp = exp.Next;
         }
 
-        rewNode = trajRews.First;
-        var actNode = trajActs.First;
-        var obsNode = trajObs.First;
-        while (rewNode != null)
+        int l = exps.Count;
+        if (expRevise > 0 && l > expRevise * 1.3f)
         {
-            Policy.Update(PolicyOpt.ComputeLoss(obsNode.Value, actNode.Value, rewNode.Value));
+            var rand = new System.Random();
+            var indices = new int[expRevise];
+            for (int i = 0; i < expRevise; i++)
+                indices[i] = rand.Next(l);
+            Array.Sort(indices);
 
-            rewNode = rewNode.Next;
-            actNode = actNode.Next;
-            obsNode = obsNode.Next;
+            var p_exp = exps.First;
+            var count = 0;
+            for (int i = 0; i < l; i++)
+            {
+                while (i == indices[count])
+                {
+                    Policy.Update(PolicyOpt.ComputeLoss(p_exp.Value.obs, p_exp.Value.act, p_exp.Value.rew));
+                    if (++count >= expRevise)
+                    {
+                        i = l;
+                        break;
+                    }
+                }
+                p_exp = p_exp.Next;
+            }
         }
     }
 
     void ClearTrajectory()
     {
-        trajObs.Clear();
-        trajActs.Clear();
-        trajRews.Clear();
+        trajectory.Clear();
     }
 
     public override void TakeAction()
@@ -263,44 +319,73 @@ public class Humon : UnityAgent
             GetPartSignedAngle(l_UpperLeg),
             GetPartSignedAngle(r_LowerLeg),
             GetPartSignedAngle(r_UpperLeg),
-            GetPartAngularVelocity(l_LowerLeg),
-            GetPartAngularVelocity(l_UpperLeg),
-            GetPartAngularVelocity(r_LowerLeg),
-            GetPartAngularVelocity(r_UpperLeg)
+            l_LowerLeg.velocity.x,
+            l_UpperLeg.velocity.x,
+            r_LowerLeg.velocity.x,
+            r_UpperLeg.velocity.x,
+            l_LowerLeg.velocity.y,
+            l_UpperLeg.velocity.y,
+            r_LowerLeg.velocity.y,
+            r_UpperLeg.velocity.y,
+            l_LowerLeg.transform.position.y * 5f,
+            r_LowerLeg.transform.position.y * 5f,
+            body.transform.position.y * 5f,
+            body.velocity.x,
+            body.angularVelocity * angularVelNormalizer
         };
 
-        var outputs = Policy.Forward(obs);
-
+        var outputs = inference ? Policy.Infer(obs) : Policy.Forward(obs);
         int action = -1;
-        if (deterministic)
+        if (preamble)
+            action = UnityEngine.Random.Range(0, actionNum);
+        else if (deterministic || inference)
         {
-            float max = -1;
-            for (int i = 0; i < outputs.Length; i++)
+            action = 0;
+            for (int i = 1; i < outputs.Length; i++)
             {
-                if (max < outputs[i])
-                {
-                    max = outputs[i];
+                if (outputs[action] < outputs[i])
                     action = i;
-                }
             }
         }
         else
+        {
             action = PolicyOpt.GetAction(obs);
+            Debug.Log(action);
+        }
 
         switch (action)
         {
-            case 0: AddSpin(legSpeed, l_LowerLeg); break;
-            case 1: AddSpin(legSpeed, l_UpperLeg); break;
+            case 0: AddSpin(-legSpeed, r_LowerLeg); break;
+            case 1: AddSpin(-legSpeed, r_UpperLeg); break;
             case 2: AddSpin(legSpeed, r_LowerLeg); break;
             case 3: AddSpin(legSpeed, r_UpperLeg); break;
             case 4: AddSpin(-legSpeed, l_LowerLeg); break;
             case 5: AddSpin(-legSpeed, l_UpperLeg); break;
-            case 6: AddSpin(-legSpeed, r_LowerLeg); break;
-            case 7: AddSpin(-legSpeed, r_UpperLeg); break;
+            case 6: AddSpin(legSpeed, l_LowerLeg); break;
+            case 7: AddSpin(legSpeed, l_UpperLeg); break;
+            case 8: AddBodyForce(legSpeed * 0.65f, true); break;
+            case 9: AddBodyForce(-legSpeed * 0.65f, true); break;
+            case 10: AddBodyForce(legSpeed * 0.65f, false); break;
+            case 11: AddBodyForce(-legSpeed * 0.65f, false); break;
+            case 12: break;
             default: Debug.LogError("Invalid action"); break;
         }
 
-        trajObs.AddLast(obs);
-        trajActs.AddLast(action);
+        if (action >= 0 && action < actionNum)
+            trajectory.AddLast(new Experience(obs, 0, action));
+    }
+
+    class Experience
+    {
+        public float[] obs;
+        public float rew;
+        public int act;
+
+        public Experience(float[] obs, float rew, int act)
+        {
+            this.obs = obs;
+            this.rew = rew;
+            this.act = act;
+        }
     }
 }
