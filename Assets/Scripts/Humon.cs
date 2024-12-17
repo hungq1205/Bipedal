@@ -5,18 +5,27 @@ using TMPro;
 using Lib.AI;
 using Lib.AI.RL;
 using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 public class Humon : UnityAgent
 {
-    const int expCap = 200;
-    const int actionNum = 13;
+    const int expCap = 30;
+    const int actionNum = 16;
+    const int obsNum = 13;
     const float rotNormalizer = 1f / 9f;
     const float angularVelNormalizer = 1f / 36f;
     static readonly Quaternion quarterRot= Quaternion.Euler(0, 0, 90);
 
-    public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg, l_Foot, r_Foot;
-    public TextMeshProUGUI scoreUI;
+    public static bool PrintPred;
 
+    [Header("Objects")]
+    [Space(5)]
+    public TextMeshProUGUI scoreUI;
+    public Rigidbody2D body, l_LowerLeg, r_LowerLeg, l_UpperLeg, r_UpperLeg, l_Foot, r_Foot, neck;
+
+    [Header("Hyperparams")]
+    [Space(5)]
     public int expRevise = 20;
     public float learningRate = 0.01f;
     public float discountFactor = 0.95f;
@@ -28,19 +37,20 @@ public class Humon : UnityAgent
     public float highLegThresholdY = -0.6f;
     public float deactiveMilisec = 100f;
     public float preambleMilisec = 150f;
-    [Range(0f, 2f)] public float timeScale = 1f;
-    public bool deterministic, inference;
-    public string saveFilepath = "model.json";
+    [Range(0.1f, 2.5f)] public float timeScale = 1f;
+    public bool deterministic, inference, printPred;
+    public string saveFilePath = "models/", saveFilename = "model.json";
 
     bool active = false, preamble = true;
     float elapsed = 0, lyingElapsed, xPosStaticElapsed, highLegElapsed, centerDif;
     float prevX;
+    float liveTime = 0;
 
-    readonly LinkedList<Experience> exps = new();
-    readonly LinkedList<Experience> trajectory = new();
+    readonly LinkedList<LinkedList<Experience>> exps = new();
+    LinkedList<Experience> trajectory = new();
 
-    ExplorationWrapper exploration;
-    Momentum opt;
+    public ExplorationWrapper exploration;
+    Optimizer opt;
 
     float _score;
     public float Score
@@ -58,8 +68,6 @@ public class Humon : UnityAgent
         GetComponentInChildren<HumonBody>().onLyingGround += humon =>
         {
             Conclude(ConcludeType.Killed);
-            Env.ResetStates();
-            humon.ResetStates();
         };
 
         active = false;
@@ -74,7 +82,10 @@ public class Humon : UnityAgent
     {
         if (active)
         {
-            if (Mathf.Abs(body.position.x - prevX) < 0.12f)
+            // Debug
+            PrintPred = printPred;
+
+            if (Mathf.Abs(body.position.x - prevX) < 0.05f)
                 xPosStaticElapsed += Time.fixedDeltaTime;
             if (GetPos().y < lyingThresholdY)
                 lyingElapsed += Time.fixedDeltaTime;
@@ -84,14 +95,13 @@ public class Humon : UnityAgent
             centerDif = l_UpperLeg.transform.position.x + (r_UpperLeg.transform.position.x - l_LowerLeg.transform.position.x) * 0.25f;
             centerDif -= body.transform.position.x;
             centerDif = Mathf.Abs(centerDif);
+            liveTime += Time.fixedDeltaTime;
 
-            Score = Env.Evaluate(this, new WalkingEnv.WalkingRecord(GetPos(), xPosStaticElapsed, lyingElapsed, highLegElapsed, centerDif));
+            Score = Env.Evaluate(this, new WalkingEnv.WalkingRecord(GetPos(), xPosStaticElapsed, lyingElapsed, highLegElapsed, centerDif, liveTime));
 
             if (Score <= -10)
             {
                 Conclude(ConcludeType.Terminate);
-                Env.ResetStates();
-                ResetStates();
             }
 
             elapsed += Time.fixedDeltaTime;
@@ -109,7 +119,9 @@ public class Humon : UnityAgent
             exploration.minRate = minExplorationRate;
             TakeAction();
             if (!inference)
-                PolicyOpt.Step();
+            {
+                Task.Run(PolicyOpt.Step);
+            }
             prevX = body.position.x;
 
             if (Time.timeScale != timeScale)
@@ -119,14 +131,13 @@ public class Humon : UnityAgent
 
     public override IPolicy GetDefaultPolicy()
     {
-        opt = new Momentum(learningRate: learningRate, weightDecay: 1e-5f);
+        opt = new SGD(learningRate: learningRate, weightDecay: 1e-5f);
 
-        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(17);
+        DenseNeuralNetworkBuilder builder = new DenseNeuralNetworkBuilder(obsNum);
         builder.NewLayers(
-            new ActivationLayer(256, ActivationFunc.Tanh), new Dropout(0.15f),
-            new ActivationLayer(256, ActivationFunc.Tanh), new Dropout(0.15f),
-            new ActivationLayer(256, ActivationFunc.Tanh), new Dropout(0.15f),
-            new ActivationLayer(128, ActivationFunc.Tanh), new Dropout(0.15f),
+            new ActivationLayer(128, ActivationFunc.Tanh),
+            new ActivationLayer(128, ActivationFunc.Tanh),
+            new ActivationLayer(64, ActivationFunc.Tanh),
             new ActivationLayer(actionNum, ActivationFunc.Softmax)
         );
 
@@ -173,11 +184,16 @@ public class Humon : UnityAgent
         r_UpperLeg.angularVelocity = 0;
         r_UpperLeg.velocity = Vector2.zero;
 
-        body.transform.localPosition = new Vector2(0, 0.667f);
+        body.transform.localPosition = new Vector2(0, 0.6f);
         body.transform.localRotation = Quaternion.identity;
         body.angularVelocity = 0;
         body.velocity = Vector2.zero;
 
+        neck.transform.localPosition = new Vector2(0, -0.007f);
+        neck.transform.localRotation = Quaternion.identity;
+        neck.angularVelocity = 0;
+        neck.velocity = Vector2.zero;
+        
         gameObject.SetActive(true);
         ConcludedType = ConcludeType.None;
         preamble = true;
@@ -185,6 +201,7 @@ public class Humon : UnityAgent
         lyingElapsed = 0;
         xPosStaticElapsed = 0;
         highLegElapsed = 0;
+        elapsed = 0;
         Score = 0;
         StartCoroutine(Preamble(preambleMilisec));
         StartCoroutine(WaitActive(deactiveMilisec));
@@ -197,22 +214,37 @@ public class Humon : UnityAgent
         transform.localPosition = pos;
     }
 
-    public float GetPartSignedAngle(Rigidbody2D rb) => rb.transform.rotation.eulerAngles.z * rotNormalizer;
+    public float GetPartSignedAngle(Rigidbody2D rb) => (rb.transform.rotation.eulerAngles.z - 180) * rotNormalizer;
 
     public float GetPartAngularVelocity(Rigidbody2D rb) => rb.angularVelocity * angularVelNormalizer;
 
-    public void AddSpin(float value, Rigidbody2D rb)
+    public void AddSpin(float value, Rigidbody2D rb, bool upper=false)
     {
         var trans = rb.transform;
         var up = trans.up;
-        rb.AddForceAtPosition(quarterRot * up * (-value), trans.position - up * trans.localScale.y, ForceMode2D.Impulse);
+        if (upper)
+            rb.AddForceAtPosition(trans.right * value, trans.position + up * trans.localScale.y, ForceMode2D.Impulse);
+        else
+            rb.AddForceAtPosition(trans.right * value, trans.position - up * trans.localScale.y, ForceMode2D.Impulse);
     }
 
-    public void AddBodyForce(float value, bool neg)
+    public void AddBodyForce(float value)
     {
         var trans = body.transform;
-        var up = neg ? -trans.up : trans.up;
-        body.AddForceAtPosition(quarterRot * up * (-value), trans.position + up * trans.localScale.y, ForceMode2D.Impulse);
+        body.AddForceAtPosition(trans.right * value, trans.position + trans.up * trans.localScale.y, ForceMode2D.Impulse);
+    }
+
+    public void AddDownwardForce(float value, Rigidbody2D rb)
+    {
+        var trans = rb.transform;
+        if (Vector2.Angle(trans.up, Vector2.right) > 20)
+            rb.AddForce(trans.up * value, ForceMode2D.Impulse);
+    }
+
+    public void OmitMovement(Rigidbody2D rb, float val = 0.05f, float eps = 0.2f)
+    { 
+        rb.angularVelocity = Mathf.Abs(rb.angularVelocity) < eps ? 0 : rb.angularVelocity * val;
+        rb.velocity = rb.velocity.sqrMagnitude < eps * 2f ? Vector2.zero : rb.velocity * val;
     }
 
     IEnumerator WaitActive(float miliSec = 100)
@@ -231,13 +263,16 @@ public class Humon : UnityAgent
     {
         ConcludedType = type;
         gameObject.SetActive(false);
-        Score = Env.Evaluate(this, new WalkingEnv.WalkingRecord(GetPos(), xPosStaticElapsed, lyingElapsed, highLegElapsed, centerDif));
+        Score = Env.Evaluate(this, new WalkingEnv.WalkingRecord(GetPos(), xPosStaticElapsed, lyingElapsed, highLegElapsed, centerDif, liveTime));
         if (trajectory.Last != null)
             trajectory.Last.Value.rew = Score;
+        liveTime = 0;
 
         if (!inference)
             UpdatePolicy();
         ClearTrajectory();
+        Env.ResetStates();
+        ResetStates();
     }
 
     public override void Hide(bool value)
@@ -257,21 +292,17 @@ public class Humon : UnityAgent
 
     void UpdatePolicy()
     {
-        opt.learningRate = learningRate;
+        ((SGD)opt).learningRate = learningRate;
 
         var cur = trajectory.Last.Previous;
-        string p = trajectory.Last.Value.rew + " ";
-        exps.AddLast(trajectory.Last.Value);
         while (cur != null)
         {
             cur.Value.rew += cur.Next.Value.rew * discountFactor;
-            p += cur.Value.rew + " ";
-            if (exps.Count >= expCap)
-                exps.RemoveFirst();
-            exps.AddLast(cur.Value);
             cur = cur.Previous;
         }
-        Debug.Log(p);
+        if (exps.Count >= expCap)
+            exps.RemoveFirst();
+        exps.AddLast(trajectory);
 
         var exp = trajectory.First;
         while (exp != null)
@@ -295,7 +326,8 @@ public class Humon : UnityAgent
             {
                 while (i == indices[count])
                 {
-                    Policy.Update(PolicyOpt.ComputeLoss(p_exp.Value.obs, p_exp.Value.act, p_exp.Value.rew));
+                    foreach (var e in p_exp.Value)
+                        Policy.Update(PolicyOpt.ComputeLoss(e.obs, e.act, e.rew));
                     if (++count >= expRevise)
                     {
                         i = l;
@@ -309,7 +341,7 @@ public class Humon : UnityAgent
 
     void ClearTrajectory()
     {
-        trajectory.Clear();
+        trajectory = new LinkedList<Experience>();
     }
 
     public override void TakeAction()
@@ -319,22 +351,19 @@ public class Humon : UnityAgent
             GetPartSignedAngle(l_UpperLeg),
             GetPartSignedAngle(r_LowerLeg),
             GetPartSignedAngle(r_UpperLeg),
-            l_LowerLeg.velocity.x,
-            l_UpperLeg.velocity.x,
-            r_LowerLeg.velocity.x,
-            r_UpperLeg.velocity.x,
-            l_LowerLeg.velocity.y,
-            l_UpperLeg.velocity.y,
-            r_LowerLeg.velocity.y,
-            r_UpperLeg.velocity.y,
-            l_LowerLeg.transform.position.y * 5f,
-            r_LowerLeg.transform.position.y * 5f,
-            body.transform.position.y * 5f,
-            body.velocity.x,
-            body.angularVelocity * angularVelNormalizer
+            GetPartAngularVelocity(l_LowerLeg),
+            GetPartAngularVelocity(l_UpperLeg),
+            GetPartAngularVelocity(r_UpperLeg),
+            GetPartAngularVelocity(r_LowerLeg),
+            l_LowerLeg.transform.position.y * 2f,
+            r_LowerLeg.transform.position.y * 2f,
+            body.transform.position.y * 2f,
+            GetPartSignedAngle(body),
+            GetPartAngularVelocity(body),
         };
 
-        var outputs = inference ? Policy.Infer(obs) : Policy.Forward(obs);
+        //var outputs = inference ? Policy.Infer(obs) : Policy.Forward(obs);
+        var outputs = Policy.Forward(obs);
         int action = -1;
         if (preamble)
             action = UnityEngine.Random.Range(0, actionNum);
@@ -350,7 +379,6 @@ public class Humon : UnityAgent
         else
         {
             action = PolicyOpt.GetAction(obs);
-            Debug.Log(action);
         }
 
         switch (action)
@@ -363,11 +391,14 @@ public class Humon : UnityAgent
             case 5: AddSpin(-legSpeed, l_UpperLeg); break;
             case 6: AddSpin(legSpeed, l_LowerLeg); break;
             case 7: AddSpin(legSpeed, l_UpperLeg); break;
-            case 8: AddBodyForce(legSpeed * 0.65f, true); break;
-            case 9: AddBodyForce(-legSpeed * 0.65f, true); break;
-            case 10: AddBodyForce(legSpeed * 0.65f, false); break;
-            case 11: AddBodyForce(-legSpeed * 0.65f, false); break;
-            case 12: break;
+            case 8: AddBodyForce(0.05f); break;
+            case 9: AddBodyForce(-0.05f); break;
+            case 10: AddDownwardForce(legSpeed, r_LowerLeg); break;
+            case 11: AddDownwardForce(-legSpeed, r_LowerLeg); break;
+            case 12: AddDownwardForce(legSpeed, l_LowerLeg); break;
+            case 13: AddDownwardForce(-legSpeed, l_LowerLeg); break; 
+            case 14: AddSpin(legSpeed, l_UpperLeg, true); break;
+            case 15: AddSpin(-legSpeed, r_UpperLeg, true); break;
             default: Debug.LogError("Invalid action"); break;
         }
 
