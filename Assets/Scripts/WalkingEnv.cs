@@ -40,15 +40,15 @@ public class WalkingEnv : UnityEnvironment
             agent.Conclude(ConcludeType.Terminate);
         }
 
-        float score = wrec.x + 10f * 1.75f;
+        float score = wrec.x + 8f * 1.75f;
         //if (wrec.centerDif < 1.6f)
         //    wrec.centerDif = 0;
         //if (wrec.xPosStaticElapsed < 3f)
         //    wrec.xPosStaticElapsed = 0;
-        score -= wrec.lyingElapsed * 6f;
+        score -= wrec.lyingElapsed * 8f;
         if (agent.ConcludedType == ConcludeType.Killed)
         {
-            score -= 12f;
+            score -= 5f;
         }
         score -= (liveThreshold - wrec.liveTime) * 1f;
         if (score > 0)

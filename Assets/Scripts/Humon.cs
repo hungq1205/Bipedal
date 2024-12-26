@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 
 public class Humon : UnityAgent
 {
-    const int expCap = 30;
+    const int expCap = 40;
     const int actionNum = 16;
     const int obsNum = 13;
     const float rotNormalizer = 1f / 9f;
@@ -237,8 +237,16 @@ public class Humon : UnityAgent
     public void AddDownwardForce(float value, Rigidbody2D rb)
     {
         var trans = rb.transform;
-        if (Vector2.Angle(trans.up, Vector2.right) > 20)
-            rb.AddForce(trans.up * value, ForceMode2D.Impulse);
+        if (value > 0)
+        {
+            if (Vector2.Angle(trans.up, Vector2.right) > 30)
+                rb.AddForce(trans.up * value, ForceMode2D.Impulse);
+        }
+        else
+        {
+            if (Vector2.Angle(trans.up, Vector2.left) > 30)
+                rb.AddForce(trans.up * value, ForceMode2D.Impulse);
+        }
     }
 
     public void OmitMovement(Rigidbody2D rb, float val = 0.05f, float eps = 0.2f)

@@ -710,21 +710,41 @@ PrefabInstance:
   m_Modification:
     m_TransformParent: {fileID: 979375332}
     m_Modifications:
+    - target: {fileID: 999463636417607340, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.x
+      value: -0.086113304
+      objectReference: {fileID: 0}
+    - target: {fileID: 999463636417607340, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.y
+      value: -0.5497124
+      objectReference: {fileID: 0}
+    - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: legSpeed
+      value: 7.25
+      objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: expRevise
-      value: 10
+      value: 13
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: inference
       value: 1
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: printPred
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: timeScale
+      value: 0.1
+      objectReference: {fileID: 0}
+    - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: learningRate
-      value: 0.0001
+      value: 0.01
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: saveFilename
-      value: model2.json
+      value: v4.json
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: deterministic
@@ -732,7 +752,7 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: discountFactor
-      value: 0.95
+      value: 0.925
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: deactiveMilisec
@@ -740,11 +760,39 @@ PrefabInstance:
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: explorationRate
-      value: 0.15
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 1794976282597208091, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: minExplorationRate
-      value: 0.025
+      value: 0.02
+      objectReference: {fileID: 0}
+    - target: {fileID: 2275625623696347285, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.x
+      value: 0.086113304
+      objectReference: {fileID: 0}
+    - target: {fileID: 2275625623696347285, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.y
+      value: -0.5497124
+      objectReference: {fileID: 0}
+    - target: {fileID: 4073313900944907494, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.x
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 4073313900944907494, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.y
+      value: -0.46921107
+      objectReference: {fileID: 0}
+    - target: {fileID: 4971418749421130587, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.x
+      value: 0.015127141
+      objectReference: {fileID: 0}
+    - target: {fileID: 4971418749421130587, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.y
+      value: -0.5431266
+      objectReference: {fileID: 0}
+    - target: {fileID: 5745369157539801712, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_text
+      value: 0
       objectReference: {fileID: 0}
     - target: {fileID: 8021568582228826117, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: m_Name
@@ -793,6 +841,14 @@ PrefabInstance:
     - target: {fileID: 8021568582228826118, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 8273810583182412988, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.x
+      value: 0.015127141
+      objectReference: {fileID: 0}
+    - target: {fileID: 8273810583182412988, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
+      propertyPath: m_ConnectedAnchor.y
+      value: -0.5431266
       objectReference: {fileID: 0}
     m_RemovedComponents: []
   m_SourcePrefab: {fileID: 100100000, guid: 70307b359b476c64dae720225e4cb75e, type: 3}
@@ -976,7 +1032,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d0ec2cc17d57cc148ac3aad01b971782, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  timeoutSec: 20
+  timeoutSec: 18
   liveThreshold: 5
   agent: {fileID: 1495229790}
   timerUI: {fileID: 1586936692}

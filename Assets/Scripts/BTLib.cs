@@ -122,11 +122,11 @@ namespace Lib
             {
                 Tuple<Layer[], WeightMatrix[]> bundle = builder.Build();
 
-                this.Layers = bundle.Item1;
-                this.Weights = bundle.Item2;
-                this.Optimizer = new SGD(learningRate);
-                this.InDim = Layers[0].dim;
-                this.OutDim = Layers[Layers.LongLength - 1].dim;
+                Layers = bundle.Item1;
+                Weights = bundle.Item2;
+                Optimizer = new SGD(learningRate);
+                InDim = Layers[0].dim;
+                OutDim = Layers[Layers.LongLength - 1].dim;
 
                 foreach (var layer in Layers)
                     layer.Build(this);
@@ -144,11 +144,11 @@ namespace Lib
             {
                 Tuple<Layer[], WeightMatrix[]> bundle = builder.Build();
 
-                this.Layers = bundle.Item1;
-                this.Weights = bundle.Item2;
-                this.Optimizer = optimizer;
-                this.InDim = Layers[0].dim;
-                this.OutDim = Layers[Layers.LongLength - 1].dim;
+                Layers = bundle.Item1;
+                Weights = bundle.Item2;
+                Optimizer = optimizer;
+                InDim = Layers[0].dim;
+                OutDim = Layers[Layers.LongLength - 1].dim;
 
                 foreach (var layer in Layers)
                     layer.Build(this);
@@ -341,14 +341,8 @@ namespace Lib
             public Tuple<Layer[], WeightMatrix[]> Build()
             {
                 WeightMatrix[] weights = new WeightMatrix[layers.Count - 1];
-
                 for (int i = 1; i < layers.Count; i++)
-                {
-                    if (layers[i - 1] is ForwardLayer && ((ForwardLayer)layers[i - 1]).port != ForwardLayer.ForwardPort.In)
-                        weights[i - 1] = layers[i - 1].GenerateWeightMatrix();
-                    else
                         weights[i - 1] = layers[i].GenerateWeightMatrix();
-                }
 
                 return (layers.ToArray(), weights).ToTuple();
             }
@@ -399,7 +393,6 @@ namespace Lib
         public class SGD : Optimizer
         {
             public float learningRate;
-            public Dictionary<int, int> bnIndexLookup { get; private set; }
 
             [JsonConstructor]
             public SGD(float learningRate, float weightDecay = 0) : base(weightDecay)
@@ -435,60 +428,9 @@ namespace Lib
 
         public enum ActivationFunc
         {
-            Tanh,
-            Linear,
-            Softmax
-        }
-
-        public class ActivationForwardLayer : ActivationLayer
-        {
-            public readonly ForwardLayer.ForwardPort port;
-
-            public ActivationForwardLayer(ActivationFunc func, ForwardLayer.ForwardPort port, bool useBias = true) : base(-1, func, useBias)
-            {
-                this.port = port;
-            }
-
-            [JsonConstructor]
-            protected ActivationForwardLayer(float[] biases, bool useBias, ActivationFunc func, ForwardLayer.ForwardPort port) : base(biases, useBias, func)
-            {
-                this.port = port;
-            }
-
-            public override void Build(INeuralNetwork network)
-            {
-                base.Build(network);
-
-                switch (port)
-                {
-                    case ForwardLayer.ForwardPort.In:
-                        dim = network.Layers[layerIndex - 1].dim;
-                        break;
-                    case ForwardLayer.ForwardPort.Out:
-                        dim = network.Layers[layerIndex + 1].dim;
-                        break;
-                    case ForwardLayer.ForwardPort.Both:
-                        if (network.Layers[layerIndex - 1].dim != network.Layers[layerIndex + 1].dim)
-                            throw new Exception("Nah forward layer dim");
-                        dim = network.Layers[layerIndex + 1].dim;
-                        break;
-                }
-
-                biases ??= new float[dim];
-            }
-
-            public override IEnumerable<(string,object)> GetJsonProperties()
-            {
-                yield return ("biases", biases);
-                yield return ("useBias", useBias);
-                yield return ("func", func);
-                yield return ("port", port);
-            }
-
-            public override WeightMatrix GenerateWeightMatrix()
-            {
-                return new ForwardWeightMatrix(useBias);
-            }
+            Tanh = 2,
+            Linear = 5,
+            Softmax = 6
         }
 
         public class ActivationLayer : Layer
@@ -543,7 +485,6 @@ namespace Lib
                         float sqrExp = MathF.Exp(x) * loss;
                         sqrExp *= sqrExp;
                         return 4 * loss / (sqrExp + (1 / sqrExp) + 2);
-                        return MathF.Exp(x) * loss;
                     case ActivationFunc.Softmax:
                         return 0;
                     case ActivationFunc.Linear:
@@ -634,76 +575,6 @@ namespace Lib
                 }
 
                 return result;
-            }
-        }
-
-        public class ForwardLayer : Layer
-        {
-            public enum ForwardPort
-            {
-                In,
-                Out,
-                Both
-            }
-
-            public readonly ForwardPort port;
-
-            float w, b;
-
-            public ForwardLayer(float w, float b, ForwardPort port = ForwardPort.In, bool useBias = false) : base(-1, useBias)
-            {
-                this.port = port;
-                this.w = w;
-                this.b = b;
-            }
-
-            [JsonConstructor]
-            protected ForwardLayer(float[] biases, bool useBias, float w, float b, ForwardPort port) : base(biases, useBias)
-            {
-                this.port = port;
-                this.w = w;
-                this.b = b;
-            }
-
-            public override IEnumerable<(string,object)> GetJsonProperties()
-            {
-                yield return ("biases", biases);
-                yield return ("useBias", useBias);
-                yield return ("w", w);
-                yield return ("b", b);
-                yield return ("port", port);
-            }
-
-            public override void Build(INeuralNetwork network)
-            {
-                base.Build(network);
-
-                switch (port)
-                {
-                    case ForwardPort.In:
-                        dim = network.Layers[layerIndex - 1].dim;
-                        break;
-                    case ForwardPort.Out:
-                        dim = network.Layers[layerIndex + 1].dim;
-                        break;
-                    case ForwardPort.Both:
-                        if (network.Layers[layerIndex - 1].dim != network.Layers[layerIndex + 1].dim)
-                            throw new Exception("Nah forward layer dim");
-                        dim = network.Layers[layerIndex + 1].dim;
-                        break;
-                }
-
-                if (biases == null)
-                {
-                    biases = new float[dim];
-                    for (int i = 0; i < dim; i++)
-                        biases[i] = b;
-                }
-            }
-
-            public override WeightMatrix GenerateWeightMatrix()
-            {
-                return new ForwardWeightMatrix(w, useBias);
             }
         }
 
@@ -907,161 +778,6 @@ namespace Lib
 
             public static WeightMatrix FromJson(string json)
                 => (WeightMatrix)LoadJson(json, weightTypes);
-        }
-
-        public class ForwardWeightMatrix : WeightMatrix
-        {
-            public readonly bool useWeights;
-
-            public float[] matrix;
-
-            public int dim => InDim;
-
-            float w = float.NaN;
-
-            public ForwardWeightMatrix(bool useWeights = true)
-            {
-                this.useWeights = useWeights;
-            }
-
-            public ForwardWeightMatrix(float w, bool useWeights = false)
-            {
-                this.useWeights = useWeights;
-                this.w = w;
-            }
-
-            [JsonConstructor]
-            private ForwardWeightMatrix(float[] matrix, bool useWeights, float w)
-            {
-                this.matrix = matrix;
-                this.w = w;
-                this.useWeights = useWeights;
-            }
-
-            public override void Build(INeuralNetwork network)
-            {
-                base.Build(network);
-
-                if (network.Layers[weightsIndex] is ForwardLayer && ((ForwardLayer)network.Layers[weightsIndex]).port != ForwardLayer.ForwardPort.In)
-                    InDim = OutDim = network.Layers[weightsIndex].dim;
-                else if (network.Layers[weightsIndex + 1] is ForwardLayer && ((ForwardLayer)network.Layers[weightsIndex + 1]).port != ForwardLayer.ForwardPort.Out)
-                    InDim = OutDim = network.Layers[weightsIndex + 1].dim;
-                else
-                    throw new Exception("Nah forward weight dim");
-
-                if (matrix == null)
-                {
-                    matrix = new float[dim];
-                    if (!(w is float.NaN))
-                        for (int i = 0; i < dim; i++)
-                            matrix[i] = w;
-                }
-            }
-
-            public override void AssignForEach(Func<int, int, float, float> value)
-            {
-                if (useWeights)
-                    for (int i = 0; i < dim; i++)
-                        matrix[i] = value(i, i, matrix[i]);
-            }
-
-            public override void GradientDescent(ref float[][] errors, ForwardResult log, Optimizer optimizer)
-            {
-
-                float[] weightErrorSum = new float[matrix.Length];
-                for (int sample = 0; sample < errors.Length; sample++)
-                {
-                    float[] layerForward = Network.Layers[weightsIndex].Forward(log.layerInputs[weightsIndex][sample]);
-                    float[] layerDif = Network.Layers[weightsIndex].FunctionDifferential(log.layerInputs[weightsIndex][sample], errors[sample]);
-
-                    for (int i = 0; i < matrix.Length; i++)
-                    {
-                        weightErrorSum[i] += errors[sample][i] * layerForward[i];
-                        errors[sample][i] = matrix[i] * layerDif[i];
-                    }
-                }
-
-                if (!useWeights) return;
-
-                for (int i = 0; i < matrix.Length; i++)
-                    matrix[i] = optimizer.WeightUpdate(weightsIndex, i, i, weightErrorSum[i]);
-            }
-
-            public override float[] Forward(float[] inputs)
-            {
-                float[] result = new float[dim];
-
-                for (int i = 0; i < dim; i++)
-                    result[i] = ForwardComp(inputs, i);
-
-                return result;
-            }
-
-            public override float[][] Forward(float[][] inputs)
-            {
-                float[][] result = new float[inputs.Length][];
-
-                for (int i = 0; i < inputs.Length; i++)
-                    result[i] = new float[dim];
-
-                for (int i = 0; i < inputs.Length; i++)
-                    for (int j = 0; j < dim; j++)
-                        result[i][j] = inputs[i][j] * matrix[j];
-
-                return result;
-            }
-
-            public override float ForwardComp(float[] inputs, int outputIndex)
-            {
-                return inputs[outputIndex] * matrix[outputIndex];
-            }
-
-            public override float GetWeight(int inIndex, int outIndex)
-            {
-                if (inIndex == outIndex && inIndex < dim)
-                    return matrix[inIndex];
-
-                throw new Exception("No weight here bro");
-            }
-
-            public override bool TryGetWeight(int inIndex, int outIndex, out float weight)
-            {
-                weight = matrix[inIndex];
-                return inIndex == outIndex && inIndex < dim;
-            }
-
-            public override bool TrySetWeight(int inIndex, int outIndex, float value)
-            {
-                if (useWeights && inIndex == outIndex && inIndex < dim)
-                {
-                    matrix[inIndex] = value;
-                    return true;
-                }
-
-                return false;
-            }
-
-            public override void CloneTo(WeightMatrix weights)
-            {
-                for (int i = 0; i < InDim; i++)
-                    weights.TrySetWeight(i, i, matrix[i]);
-            }
-
-            public override WeightMatrix Clone()
-            {
-                var clone = new ForwardWeightMatrix(useWeights);
-                clone.matrix = new float[InDim];
-                CloneTo(clone);
-
-                return clone;
-            }
-
-            public override IEnumerable<(string,object)> GetJsonProperties()
-            {
-                yield return ("matrix", matrix);
-                yield return ("useWeights", useWeights);
-                yield return ("w", w);
-            }
         }
 
         public class DenseWeightMatrix : WeightMatrix
